@@ -1,6 +1,8 @@
 module Main exposing (main)
 
 import Browser
+import Element exposing (Element)
+import Element.Input as Input
 import Html exposing (Html)
 import Html.Events as Event
 import Http
@@ -139,57 +141,72 @@ update msg model =
 
 view : Model -> Html Msg
 view model =
-    case model.session of
-        LoggedIn loggedInModel ->
-            webhookDashboard loggedInModel
+    Element.layout [] <|
+        case model.session of
+            LoggedIn loggedInModel ->
+                webhookDashboard loggedInModel
 
-        _ ->
-            loginPage model
+            _ ->
+                loginPage model
 
 
-loginPage : Model -> Html Msg
+loginPage : Model -> Element Msg
 loginPage model =
     let
         statusMsg =
             case model.session of
                 AttemptingLogin ->
-                    Html.div [] [ Html.text "Logging in..." ]
+                    Element.text "Logging in..."
 
                 LoginFailure msg ->
-                    Html.div [] [ Html.text msg ]
+                    Element.text msg
 
                 _ ->
-                    Html.text ""
+                    Element.none
+
+        (UserUUID userId) =
+            model.userId
+
+        (UserApiKey apiKey) =
+            model.userApiKey
     in
-    Html.div
+    Element.column
         []
-        [ Html.input
-            [ Event.onInput (UpdateUserId << UserUUID) ]
+        [ Input.username
             []
-        , Html.br [] []
-        , Html.input
-            [ Event.onInput (UpdateUserApiKey << UserApiKey) ]
+            { onChange = UpdateUserId << UserUUID
+            , text = userId
+            , placeholder = Nothing
+            , label = Input.labelLeft [] (Element.text "User ID")
+            }
+        , Input.currentPassword
             []
-        , Html.br [] []
-        , Html.button
-            [ Event.onClick Login ]
-            [ Html.text "Login" ]
-        , Html.br [] []
+            { onChange = UpdateUserApiKey << UserApiKey
+            , text = apiKey
+            , placeholder = Nothing
+            , label = Input.labelLeft [] (Element.text "API Key")
+            , show = False
+            }
+        , Input.button
+            []
+            { onPress = Just Login
+            , label = Element.text "Login"
+            }
         , statusMsg
         ]
 
 
-webhookDashboard : LoggedInModel -> Html Msg
+webhookDashboard : LoggedInModel -> Element Msg
 webhookDashboard model =
     case model.webhooks of
         Loading ->
-            Html.text "Loading webhooks."
+            Element.text "Loading webhooks."
 
         Ready webhooks ->
-            Html.div [] <|
+            Element.column [] <|
                 List.map
                     (\webhook ->
-                        Html.p [] [ Html.text (Debug.toString webhook) ]
+                        Element.paragraph [] [ Element.text (Debug.toString webhook) ]
                     )
                     webhooks
 
