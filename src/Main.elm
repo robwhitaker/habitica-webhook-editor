@@ -4,6 +4,7 @@ import Browser
 import Element exposing (Element)
 import Element.Input as Input
 import Html exposing (Html)
+import Html.Attributes as A
 import Html.Events as Event
 import Http
 import Json.Decode as Decode exposing (Decoder)
@@ -417,7 +418,7 @@ loginPage model =
     Element.column
         []
         [ Input.username
-            []
+            [ Element.htmlAttribute (A.name "username") ]
             { onChange = UpdateUserId << UserUUID
             , text = userId
             , placeholder = Nothing
