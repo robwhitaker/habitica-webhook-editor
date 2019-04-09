@@ -21,8 +21,12 @@ type alias Model =
 
 type alias LoggedInModel =
     { webhooks : WebhookStatus
-    , editor : Maybe WebhookEditForm
+    , editor : Maybe Editor
     }
+
+
+type alias Editor =
+    ( WebhookEditForm, List ValidationError )
 
 
 empty : Model
@@ -31,6 +35,10 @@ empty =
     , userApiKey = UserApiKey ""
     , session = NotLoggedIn
     }
+
+
+type alias ValidationError =
+    String
 
 
 type Session
@@ -177,6 +185,7 @@ type Msg
     | EditorSetOptMountRaised Bool
     | EditorSetOptLeveledUp Bool
     | EditorSetOptGroupId String
+    | EditorSubmit
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -226,15 +235,17 @@ update msg model =
                                 { loggedInModel
                                     | editor =
                                         Just <|
-                                            { id = Uuid.toString id
-                                            , url = Url.toString webhook.url
-                                            , enabled = webhook.enabled
-                                            , label = webhook.label
-                                            , type_ = hookOpts.editType
-                                            , taskActivityOptions = hookOpts.opts.taskActivityOptions
-                                            , groupChatReceivedOptions = hookOpts.opts.groupChatReceivedOptions
-                                            , userActivityOptions = hookOpts.opts.userActivityOptions
-                                            }
+                                            ( { id = Uuid.toString id
+                                              , url = Url.toString webhook.url
+                                              , enabled = webhook.enabled
+                                              , label = webhook.label
+                                              , type_ = hookOpts.editType
+                                              , taskActivityOptions = hookOpts.opts.taskActivityOptions
+                                              , groupChatReceivedOptions = hookOpts.opts.groupChatReceivedOptions
+                                              , userActivityOptions = hookOpts.opts.userActivityOptions
+                                              }
+                                            , []
+                                            )
                                 }
                       }
                     , Cmd.none
@@ -244,19 +255,19 @@ update msg model =
                     ( model, Cmd.none )
 
         EditorSetEnabled enabled ->
-            ( mapEditor (\form -> { form | enabled = enabled }) model, Cmd.none )
+            ( mapEditorFormFields (\form -> { form | enabled = enabled }) model, Cmd.none )
 
         EditorSetLabel label ->
-            ( mapEditor (\form -> { form | label = label }) model, Cmd.none )
+            ( mapEditorFormFields (\form -> { form | label = label }) model, Cmd.none )
 
         EditorSetId id ->
-            ( mapEditor (\form -> { form | id = id }) model, Cmd.none )
+            ( mapEditorFormFields (\form -> { form | id = id }) model, Cmd.none )
 
         EditorSetUrl url ->
-            ( mapEditor (\form -> { form | url = url }) model, Cmd.none )
+            ( mapEditorFormFields (\form -> { form | url = url }) model, Cmd.none )
 
         EditorSetType type_ ->
-            ( mapEditor (\form -> { form | type_ = type_ }) model, Cmd.none )
+            ( mapEditorFormFields (\form -> { form | type_ = type_ }) model, Cmd.none )
 
         EditorSetOptCreated created ->
             ( mapTaskActivityOptions (\opts -> { opts | created = created }) model, Cmd.none )
@@ -281,6 +292,124 @@ update msg model =
 
         EditorSetOptGroupId groupId ->
             ( mapGroupChatReceivedOptions (\opts -> { opts | groupId = groupId }) model, Cmd.none )
+
+        EditorSubmit ->
+            case getEditor model of
+                Nothing ->
+                    ( model, Cmd.none )
+
+                Just ( formFields, _ ) ->
+                    case editorToWebhook formFields of
+                        Err errors ->
+                            ( mapEditorErrors (always errors) model, Cmd.none )
+
+                        Ok webhook ->
+                            Debug.todo "create a web request to update the webhook; also blank out errors"
+
+
+editorToWebhook : WebhookEditForm -> Result (List ValidationError) Webhook
+editorToWebhook form =
+    let
+        validatedUrl =
+            form.url
+                |> Url.fromString
+                |> Maybe.map Ok
+                |> Maybe.withDefault (Err "Invalid URL.")
+
+        validatedHookId =
+            form.id
+                |> Uuid.fromString
+                |> Maybe.map (Ok << WebhookUUID)
+                |> Maybe.withDefault (Err "Malformed UUID provided for field 'ID'.")
+    in
+    case form.type_ of
+        EditTaskActivity ->
+            let
+                (EditableTaskActivityOptions opts) =
+                    form.taskActivityOptions
+            in
+            Ok
+                (\url hookId ->
+                    { url = url
+                    , id = hookId
+                    , label = form.label
+                    , enabled = form.enabled
+                    , type_ = TaskActivity opts
+                    }
+                )
+                |> andMapAccumErr validatedUrl
+                |> andMapAccumErr validatedHookId
+
+        EditGroupChatReceived ->
+            let
+                (EditableGroupChatReceivedOptions opts) =
+                    form.groupChatReceivedOptions
+
+                validatedGroupId =
+                    opts.groupId
+                        |> Uuid.fromString
+                        |> Maybe.map (Ok << GroupUUID)
+                        |> Maybe.withDefault (Err "Malformed UUID provided for field 'Group ID'.")
+            in
+            Ok
+                (\url hookId groupId ->
+                    { url = url
+                    , id = hookId
+                    , label = form.label
+                    , enabled = form.enabled
+                    , type_ = GroupChatReceived { groupId = groupId }
+                    }
+                )
+                |> andMapAccumErr validatedUrl
+                |> andMapAccumErr validatedHookId
+                |> andMapAccumErr validatedGroupId
+
+        EditUserActivity ->
+            let
+                (EditableUserActivityOptions opts) =
+                    form.userActivityOptions
+            in
+            Ok
+                (\url hookId ->
+                    { url = url
+                    , id = hookId
+                    , label = form.label
+                    , enabled = form.enabled
+                    , type_ = UserActivity opts
+                    }
+                )
+                |> andMapAccumErr validatedUrl
+                |> andMapAccumErr validatedHookId
+
+
+andMapAccumErr : Result x a -> Result (List x) (a -> b) -> Result (List x) b
+andMapAccumErr result fnResult =
+    case fnResult of
+        Err errList ->
+            case result of
+                Ok _ ->
+                    Err errList
+
+                Err err ->
+                    Err (err :: errList)
+
+        Ok f ->
+            case result of
+                Ok val ->
+                    Ok (f val)
+
+                Err err ->
+                    Err [ err ]
+
+
+getEditor : Model -> Maybe Editor
+getEditor model =
+    case model.session of
+        LoggedIn loggedInModel ->
+            loggedInModel.editor
+
+        _ ->
+            Nothing
 
 
 type alias EditorOpts =
@@ -327,7 +456,7 @@ typeToEditable type_ =
             }
 
 
-mapEditor : (WebhookEditForm -> WebhookEditForm) -> Model -> Model
+mapEditor : (Editor -> Editor) -> Model -> Model
 mapEditor f model =
     case model.session of
         LoggedIn loggedInModel ->
@@ -348,9 +477,33 @@ mapEditor f model =
             model
 
 
+mapEditorFormFields : (WebhookEditForm -> WebhookEditForm) -> Model -> Model
+mapEditorFormFields f =
+    mapEditor
+        (\form ->
+            let
+                ( formFields, errors ) =
+                    form
+            in
+            ( f formFields, errors )
+        )
+
+
+mapEditorErrors : (List ValidationError -> List ValidationError) -> Model -> Model
+mapEditorErrors f =
+    mapEditor
+        (\form ->
+            let
+                ( formFields, errors ) =
+                    form
+            in
+            ( formFields, f errors )
+        )
+
+
 mapTaskActivityOptions : (TaskActivityOptions -> TaskActivityOptions) -> Model -> Model
 mapTaskActivityOptions f =
-    mapEditor
+    mapEditorFormFields
         (\form ->
             let
                 (EditableTaskActivityOptions opts) =
@@ -362,7 +515,7 @@ mapTaskActivityOptions f =
 
 mapGroupChatReceivedOptions : ({ groupId : String } -> { groupId : String }) -> Model -> Model
 mapGroupChatReceivedOptions f =
-    mapEditor
+    mapEditorFormFields
         (\form ->
             let
                 (EditableGroupChatReceivedOptions opts) =
@@ -374,7 +527,7 @@ mapGroupChatReceivedOptions f =
 
 mapUserActivityOptions : (UserActivityOptions -> UserActivityOptions) -> Model -> Model
 mapUserActivityOptions f =
-    mapEditor
+    mapEditorFormFields
         (\form ->
             let
                 (EditableUserActivityOptions opts) =
@@ -466,9 +619,14 @@ webhookDashboard model =
                             webhooks
 
                 Just editor ->
+                    let
+                        ( fields, errors ) =
+                            editor
+                    in
                     Element.column
                         []
-                        [ Input.checkbox []
+                        [ Element.column [] <| List.map Element.text errors
+                        , Input.checkbox []
                             { onChange = EditorSetEnabled
                             , icon =
                                 \bool ->
@@ -477,27 +635,27 @@ webhookDashboard model =
 
                                     else
                                         Element.text "☐"
-                            , checked = editor.enabled
+                            , checked = fields.enabled
                             , label = Input.labelLeft [] (Element.text "Enabled")
                             }
                         , Input.text
                             []
                             { onChange = EditorSetLabel
-                            , text = editor.label
+                            , text = fields.label
                             , placeholder = Nothing
                             , label = Input.labelLeft [] (Element.text "Label")
                             }
                         , Input.text
                             []
                             { onChange = EditorSetId
-                            , text = editor.id
+                            , text = fields.id
                             , placeholder = Nothing
                             , label = Input.labelLeft [] (Element.text "UUID")
                             }
                         , Input.text
                             []
                             { onChange = EditorSetUrl
-                            , text = editor.url
+                            , text = fields.url
                             , placeholder = Nothing
                             , label = Input.labelLeft [] (Element.text "URL")
                             }
@@ -527,14 +685,14 @@ webhookDashboard model =
                                         else
                                             Element.text <| "[x] userActivity"
                                 ]
-                            , selected = Just editor.type_
+                            , selected = Just fields.type_
                             , label = Input.labelAbove [] (Element.text "Webhook Type")
                             }
-                        , case editor.type_ of
+                        , case fields.type_ of
                             EditTaskActivity ->
                                 let
                                     (EditableTaskActivityOptions opts) =
-                                        editor.taskActivityOptions
+                                        fields.taskActivityOptions
                                 in
                                 Element.column
                                     []
@@ -547,7 +705,7 @@ webhookDashboard model =
                             EditGroupChatReceived ->
                                 let
                                     (EditableGroupChatReceivedOptions opts) =
-                                        editor.groupChatReceivedOptions
+                                        fields.groupChatReceivedOptions
                                 in
                                 Element.column
                                     []
@@ -563,7 +721,7 @@ webhookDashboard model =
                             EditUserActivity ->
                                 let
                                     (EditableUserActivityOptions opts) =
-                                        editor.userActivityOptions
+                                        fields.userActivityOptions
                                 in
                                 Element.column
                                     []
@@ -571,6 +729,11 @@ webhookDashboard model =
                                     , checkbox EditorSetOptPetHatched opts.petHatched "petHatched"
                                     , checkbox EditorSetOptLeveledUp opts.leveledUp "leveledUp"
                                     ]
+                        , Input.button
+                            []
+                            { onPress = Just EditorSubmit
+                            , label = Element.text "Submit"
+                            }
                         ]
 
 
