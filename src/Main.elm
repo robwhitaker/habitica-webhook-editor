@@ -8,6 +8,7 @@ import Html.Attributes as A
 import Html.Events as Event
 import Http
 import Json.Decode as Decode exposing (Decoder)
+import Json.Encode as Encode exposing (Value)
 import Url exposing (Url)
 import Uuid exposing (Uuid)
 
@@ -103,10 +104,10 @@ type alias UserActivityOptions =
 
 
 type alias Webhook =
-    { id : WebhookUUID
+    { id : Maybe WebhookUUID
     , url : Url
-    , enabled : Bool
     , label : String
+    , enabled : Bool
     , type_ : Type
     }
 
@@ -155,7 +156,7 @@ emptyEditableUserActivity =
 
 
 type alias WebhookEditForm =
-    { id : String
+    { id : Maybe String
     , url : String
     , enabled : Bool
     , label : String
@@ -171,6 +172,7 @@ type Msg
     | UpdateUserApiKey UserApiKey
     | Login
     | ReceiveLoginResult (Result String Session)
+    | SavedWebhook (Result Http.Error ())
     | Edit Webhook
     | EditorSetEnabled Bool
     | EditorSetLabel String
@@ -186,6 +188,7 @@ type Msg
     | EditorSetOptLeveledUp Bool
     | EditorSetOptGroupId String
     | EditorSubmit
+    | EditorCancel
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -219,12 +222,21 @@ update msg model =
                     , Cmd.none
                     )
 
+        SavedWebhook result ->
+            let
+                -- TODO: this is just copied from above to reload the webhooks
+                --       and probably shouldn't be duplicated like this
+                loginCmd =
+                    requestUser model.userId model.userApiKey
+            in
+            ( model, loginCmd )
+
         Edit webhook ->
             case model.session of
                 LoggedIn loggedInModel ->
                     let
-                        (WebhookUUID id) =
-                            webhook.id
+                        webhookUuid =
+                            Maybe.map (\(WebhookUUID uuid) -> Uuid.toString uuid) webhook.id
 
                         hookOpts =
                             typeToEditable webhook.type_
@@ -235,7 +247,7 @@ update msg model =
                                 { loggedInModel
                                     | editor =
                                         Just <|
-                                            ( { id = Uuid.toString id
+                                            ( { id = webhookUuid
                                               , url = Url.toString webhook.url
                                               , enabled = webhook.enabled
                                               , label = webhook.label
@@ -261,7 +273,7 @@ update msg model =
             ( mapEditorFormFields (\form -> { form | label = label }) model, Cmd.none )
 
         EditorSetId id ->
-            ( mapEditorFormFields (\form -> { form | id = id }) model, Cmd.none )
+            ( mapEditorFormFields (\form -> { form | id = Just id }) model, Cmd.none )
 
         EditorSetUrl url ->
             ( mapEditorFormFields (\form -> { form | url = url }) model, Cmd.none )
@@ -304,7 +316,29 @@ update msg model =
                             ( mapEditorErrors (always errors) model, Cmd.none )
 
                         Ok webhook ->
-                            Debug.todo "create a web request to update the webhook; also blank out errors"
+                            let
+                                newModel =
+                                    { model
+                                        | session =
+                                            LoggedIn
+                                                { webhooks = Loading
+                                                , editor = Nothing
+                                                }
+                                    }
+                            in
+                            ( newModel
+                            , saveWebhook model.userId model.userApiKey webhook
+                            )
+
+        EditorCancel ->
+            case model.session of
+                LoggedIn loggedInModel ->
+                    ( { model | session = LoggedIn { loggedInModel | editor = Nothing } }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
 
 
 editorToWebhook : WebhookEditForm -> Result (List ValidationError) Webhook
@@ -317,10 +351,15 @@ editorToWebhook form =
                 |> Maybe.withDefault (Err "Invalid URL.")
 
         validatedHookId =
-            form.id
-                |> Uuid.fromString
-                |> Maybe.map (Ok << WebhookUUID)
-                |> Maybe.withDefault (Err "Malformed UUID provided for field 'ID'.")
+            case form.id of
+                Nothing ->
+                    Ok Nothing
+
+                Just someId ->
+                    someId
+                        |> Uuid.fromString
+                        |> Maybe.map (Ok << Just << WebhookUUID)
+                        |> Maybe.withDefault (Err "Malformed UUID provided for field 'ID'.")
     in
     case form.type_ of
         EditTaskActivity ->
@@ -645,13 +684,8 @@ webhookDashboard model =
                             , placeholder = Nothing
                             , label = Input.labelLeft [] (Element.text "Label")
                             }
-                        , Input.text
-                            []
-                            { onChange = EditorSetId
-                            , text = fields.id
-                            , placeholder = Nothing
-                            , label = Input.labelLeft [] (Element.text "UUID")
-                            }
+                        , Element.text
+                            (Maybe.withDefault "New Webhook." fields.id)
                         , Input.text
                             []
                             { onChange = EditorSetUrl
@@ -734,6 +768,11 @@ webhookDashboard model =
                             { onPress = Just EditorSubmit
                             , label = Element.text "Submit"
                             }
+                        , Input.button
+                            []
+                            { onPress = Just EditorCancel
+                            , label = Element.text "Cancel"
+                            }
                         ]
 
 
@@ -753,33 +792,33 @@ checkbox msg isChecked labelTxt =
         }
 
 
+customExpectJson : (Result String a -> msg) -> Decoder a -> Http.Expect msg
+customExpectJson toMsg decoder =
+    Http.expectStringResponse toMsg <|
+        \response ->
+            case response of
+                Http.BadStatus_ metadata body ->
+                    case Decode.decodeString decoder body of
+                        Ok value ->
+                            Ok value
+
+                        Err err ->
+                            Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
+
+                Http.GoodStatus_ metadata body ->
+                    case Decode.decodeString decoder body of
+                        Ok value ->
+                            Ok value
+
+                        Err err ->
+                            Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
+
+                _ ->
+                    Err "Something went wrong. Please try again later."
+
+
 requestUser : UserUUID -> UserApiKey -> Cmd Msg
 requestUser (UserUUID uuid) (UserApiKey apiKey) =
-    let
-        customExpectJson : (Result String a -> msg) -> Decoder a -> Http.Expect msg
-        customExpectJson toMsg decoder =
-            Http.expectStringResponse toMsg <|
-                \response ->
-                    case response of
-                        Http.BadStatus_ metadata body ->
-                            case Decode.decodeString decoder body of
-                                Ok value ->
-                                    Ok value
-
-                                Err err ->
-                                    Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
-
-                        Http.GoodStatus_ metadata body ->
-                            case Decode.decodeString decoder body of
-                                Ok value ->
-                                    Ok value
-
-                                Err err ->
-                                    Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
-
-                        _ ->
-                            Err "Something went wrong. Please try again later."
-    in
     Http.request
         { method = "GET"
         , headers =
@@ -789,6 +828,41 @@ requestUser (UserUUID uuid) (UserApiKey apiKey) =
         , url = "https://habitica.com/api/v3/user"
         , body = Http.emptyBody
         , expect = customExpectJson ReceiveLoginResult loginDecoder
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+saveWebhook : UserUUID -> UserApiKey -> Webhook -> Cmd Msg
+saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
+    let
+        ( method, endpoint ) =
+            case webhook.id of
+                Nothing ->
+                    ( "POST"
+                    , "https://habitica.com/api/v3/user/webhook"
+                    )
+
+                Just (WebhookUUID webhookUuid) ->
+                    ( "PUT"
+                    , "https://habitica.com/api/v3/user/webhook/" ++ Uuid.toString webhookUuid
+                    )
+
+        encodedWebhook =
+            webhookEncoder webhook
+
+        debugPrint =
+            Debug.log "encoded webhook" <| Encode.encode 4 encodedWebhook
+    in
+    Http.request
+        { method = method
+        , headers =
+            [ Http.header "x-api-user" uuid
+            , Http.header "x-api-key" apiKey
+            ]
+        , url = endpoint
+        , body = Http.jsonBody encodedWebhook
+        , expect = Http.expectWhatever SavedWebhook
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -862,11 +936,65 @@ webhookDecoder =
                 |> Maybe.withDefault (Decode.fail ("Invalid webhook URL: " ++ urlStr))
     in
     Decode.map5 Webhook
-        (Decode.field "id" (Decode.map WebhookUUID Uuid.decoder))
+        (Decode.field "id" (Decode.map (Just << WebhookUUID) Uuid.decoder))
         (Decode.field "url" Decode.string |> Decode.andThen decodeUrl)
-        (Decode.field "enabled" Decode.bool)
         (Decode.field "label" Decode.string)
+        (Decode.field "enabled" Decode.bool)
         (Decode.field "type" Decode.string |> Decode.andThen decodeType)
+
+
+webhookEncoder : Webhook -> Value
+webhookEncoder webhook =
+    Encode.object <|
+        [ ( "url", Encode.string (Url.toString webhook.url) )
+        , ( "label"
+            -- This is a janky hack because Habitica seems to treat
+            -- empty string as "no label field provided" and therefore
+            -- fails to clear the field.
+          , if String.length webhook.label > 0 then
+                Encode.string webhook.label
+
+            else
+                Encode.string " "
+          )
+        , ( "enabled", Encode.bool webhook.enabled )
+        ]
+            ++ (case webhook.type_ of
+                    TaskActivity opts ->
+                        [ ( "type", Encode.string "taskActivity" )
+                        , ( "options"
+                          , Encode.object
+                                [ ( "created", Encode.bool opts.created )
+                                , ( "updated", Encode.bool opts.updated )
+                                , ( "deleted", Encode.bool opts.deleted )
+                                , ( "scored", Encode.bool opts.scored )
+                                ]
+                          )
+                        ]
+
+                    GroupChatReceived opts ->
+                        let
+                            (GroupUUID groupUuid) =
+                                opts.groupId
+                        in
+                        [ ( "type", Encode.string "groupChatReceived" )
+                        , ( "options"
+                          , Encode.object
+                                [ ( "groupId", Uuid.encode groupUuid ) ]
+                          )
+                        ]
+
+                    UserActivity opts ->
+                        [ ( "type", Encode.string "userActivity" )
+                        , ( "options"
+                          , Encode.object
+                                [ ( "petHatched", Encode.bool opts.petHatched )
+                                , ( "mountRaised", Encode.bool opts.mountRaised )
+                                , ( "leveledUp", Encode.bool opts.leveledUp )
+                                ]
+                          )
+                        ]
+               )
 
 
 main : Program () Model Msg
