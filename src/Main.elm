@@ -101,6 +101,7 @@ type alias TaskActivityOptions =
     , updated : Bool
     , deleted : Bool
     , scored : Bool
+    , checklistScored : Bool
     }
 
 
@@ -149,6 +150,7 @@ emptyEditableTaskActivity =
         , updated = False
         , deleted = False
         , scored = False
+        , checklistScored = False
         }
 
 
@@ -212,6 +214,7 @@ type Msg
     | EditorSetOptUpdated Bool
     | EditorSetOptDeleted Bool
     | EditorSetOptScored Bool
+    | EditorSetOptChecklistScored Bool
     | EditorSetOptPetHatched Bool
     | EditorSetOptMountRaised Bool
     | EditorSetOptLeveledUp Bool
@@ -385,6 +388,9 @@ update msg model =
 
         EditorSetOptScored scored ->
             ( mapTaskActivityOptions (\opts -> { opts | scored = scored }) model, Cmd.none )
+
+        EditorSetOptChecklistScored checklistScored ->
+            ( mapTaskActivityOptions (\opts -> { opts | checklistScored = checklistScored }) model, Cmd.none )
 
         EditorSetOptPetHatched petHatched ->
             ( mapUserActivityOptions (\opts -> { opts | petHatched = petHatched }) model, Cmd.none )
@@ -923,6 +929,7 @@ webhookDashboard model =
                                     , checkbox EditorSetOptUpdated opts.updated "updated"
                                     , checkbox EditorSetOptDeleted opts.deleted "deleted"
                                     , checkbox EditorSetOptScored opts.scored "scored"
+                                    , checkbox EditorSetOptChecklistScored opts.checklistScored "checklistScored"
                                     ]
 
                             EditGroupChatReceived ->
@@ -1057,6 +1064,7 @@ saveWebhookWrapper uuid apiKey webhook =
                         , updated = False
                         , deleted = False
                         , scored = False
+                        , checklistScored = False
                         }
 
                 _ ->
@@ -1139,11 +1147,12 @@ webhookDecoder =
     let
         taskActivityOptionsDecoder : Decoder TaskActivityOptions
         taskActivityOptionsDecoder =
-            Decode.map4 TaskActivityOptions
+            Decode.map5 TaskActivityOptions
                 (Decode.field "created" Decode.bool)
                 (Decode.field "updated" Decode.bool)
                 (Decode.field "deleted" Decode.bool)
                 (Decode.field "scored" Decode.bool)
+                (Decode.field "checklistScored" Decode.bool)
 
         groupChatReceivedOptionsDecoder : Decoder GroupChatReceivedOptions
         groupChatReceivedOptionsDecoder =
@@ -1215,6 +1224,7 @@ webhookEncoder webhook =
                                 , ( "updated", Encode.bool opts.updated )
                                 , ( "deleted", Encode.bool opts.deleted )
                                 , ( "scored", Encode.bool opts.scored )
+                                , ( "checklistScored", Encode.bool opts.checklistScored )
                                 ]
                           )
                         ]
