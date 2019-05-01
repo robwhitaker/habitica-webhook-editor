@@ -2,7 +2,11 @@ module Main exposing (main)
 
 import Browser
 import Element exposing (Element)
+import Element.Background as BG
+import Element.Border as Border
+import Element.Font as Font
 import Element.Input as Input
+import Element.Region as Region
 import Html exposing (Html)
 import Html.Attributes as A
 import Html.Events as Event
@@ -670,9 +674,34 @@ mapUserActivityOptions f =
         )
 
 
+theme =
+    { text =
+        { normal = Element.rgb 1 1 1
+        , error = Element.rgb255 150 0 0
+        }
+    , button =
+        { yes = Element.rgb255 90 0 0
+        , yesText = Element.rgb 1 1 1
+        , no = Element.rgb 0 0 0 --TODO: pick color
+        , noText = Element.rgb 0 0 0 --TODO: pick color
+        }
+    , input =
+        { background = Element.rgb255 50 50 50
+        , text = Element.rgb 1 1 1
+        , placeholderText = Element.rgb 0.8 0.8 0.8
+        }
+    , page =
+        { background = Element.rgb255 10 10 10 }
+    }
+
+
 view : Model -> Html Msg
 view model =
-    Element.layout [] <|
+    Element.layout
+        [ BG.color theme.page.background
+        , Font.color theme.text.normal
+        ]
+    <|
         case model.session of
             LoggedIn loggedInModel ->
                 webhookDashboard loggedInModel
@@ -690,7 +719,11 @@ loginPage model =
                     Element.text "Logging in..."
 
                 LoginFailure msg ->
-                    Element.text msg
+                    Element.el
+                        [ Font.color theme.text.error
+                        , Element.centerX
+                        ]
+                        (Element.text msg)
 
                 _ ->
                     Element.none
@@ -702,29 +735,68 @@ loginPage model =
             model.userApiKey
     in
     Element.column
-        []
-        [ Input.username
-            [ Element.htmlAttribute (A.name "username") ]
+        [ Element.centerX
+        , Element.centerY
+        , Element.spacing 10
+        ]
+        [ Element.el
+            [ Element.centerX
+            , Region.heading 1
+            , Font.size 26
+            ]
+            (Element.text "Habitica Webhook Editor")
+        , Input.username
+            [ Element.htmlAttribute (A.name "username")
+            , BG.color theme.input.background
+            , Font.color theme.input.text
+            , Border.width 0
+            ]
             { onChange = UpdateUserId << UserUUID
             , text = userId
-            , placeholder = Nothing
-            , label = Input.labelLeft [] (Element.text "User ID")
+            , placeholder = inputPlaceholder "User ID"
+            , label = Input.labelHidden "User ID"
             }
         , Input.currentPassword
-            []
+            [ Element.htmlAttribute (A.name "password")
+            , BG.color theme.input.background
+            , Font.color theme.input.text
+            , Border.width 0
+            ]
             { onChange = UpdateUserApiKey << UserApiKey
             , text = apiKey
-            , placeholder = Nothing
-            , label = Input.labelLeft [] (Element.text "API Key")
+            , placeholder = inputPlaceholder "API Key"
+            , label = Input.labelHidden "API Key"
             , show = False
             }
         , Input.button
-            []
+            [ Element.centerX
+            , BG.color theme.button.yes
+            , Element.padding 10
+            , Font.color theme.button.yesText
+            , Border.rounded 3
+            , Element.width Element.fill
+            , Font.center
+            ]
             { onPress = Just Login
             , label = Element.text "Login"
             }
-        , statusMsg
+        , Element.el
+            [ Element.width Element.fill
+            , Font.size 16
+            , Font.center
+            ]
+            statusMsg
         ]
+
+
+inputPlaceholder : String -> Maybe (Input.Placeholder Msg)
+inputPlaceholder txt =
+    Just <|
+        Input.placeholder
+            [ Font.center
+            , Font.color theme.input.placeholderText
+            ]
+            (Element.text txt)
 
 
 webhookDashboard : LoggedInModel -> Element Msg
