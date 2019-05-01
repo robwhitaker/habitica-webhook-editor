@@ -9,6 +9,7 @@ import Html.Events as Event
 import Http
 import Json.Decode as Decode exposing (Decoder)
 import Json.Encode as Encode exposing (Value)
+import Task exposing (Task)
 import Url exposing (Url)
 import Uuid exposing (Uuid)
 
@@ -172,7 +173,7 @@ type Msg
     | UpdateUserApiKey UserApiKey
     | Login
     | ReceiveLoginResult (Result String Session)
-    | SavedWebhook (Result Http.Error ())
+    | SavedWebhook (Result (Http.Response String) ())
     | Edit Webhook
     | EditorSetEnabled Bool
     | EditorSetLabel String
@@ -325,9 +326,13 @@ update msg model =
                                                 , editor = Nothing
                                                 }
                                     }
+
+                                saveCmd =
+                                    saveWebhookWrapper model.userId model.userApiKey webhook
+                                        |> Task.attempt SavedWebhook
                             in
                             ( newModel
-                            , saveWebhook model.userId model.userApiKey webhook
+                            , saveCmd
                             )
 
         EditorCancel ->
@@ -833,7 +838,39 @@ requestUser (UserUUID uuid) (UserApiKey apiKey) =
         }
 
 
-saveWebhook : UserUUID -> UserApiKey -> Webhook -> Cmd Msg
+
+{- This is a hack fix to address a Habitica API bug where changing a webhook's options
+   doesn't take unless you are also changing the type of the webhook. This wrapper calls
+   saveWebook twice, the first time switching the type with garbage options and the second
+   changing it back with the options we want.
+-}
+
+
+saveWebhookWrapper : UserUUID -> UserApiKey -> Webhook -> Task (Http.Response String) ()
+saveWebhookWrapper uuid apiKey webhook =
+    let
+        tempType =
+            case webhook.type_ of
+                UserActivity _ ->
+                    TaskActivity
+                        { created = False
+                        , updated = False
+                        , deleted = False
+                        , scored = False
+                        }
+
+                _ ->
+                    UserActivity
+                        { petHatched = False
+                        , mountRaised = False
+                        , leveledUp = False
+                        }
+    in
+    saveWebhook uuid apiKey { webhook | type_ = tempType }
+        |> Task.andThen (\_ -> saveWebhook uuid apiKey webhook)
+
+
+saveWebhook : UserUUID -> UserApiKey -> Webhook -> Task (Http.Response String) ()
 saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
     let
         ( method, endpoint ) =
@@ -854,7 +891,7 @@ saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
         debugPrint =
             Debug.log "encoded webhook" <| Encode.encode 4 encodedWebhook
     in
-    Http.request
+    Http.task
         { method = method
         , headers =
             [ Http.header "x-api-user" uuid
@@ -862,9 +899,17 @@ saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
             ]
         , url = endpoint
         , body = Http.jsonBody encodedWebhook
-        , expect = Http.expectWhatever SavedWebhook
+        , resolver =
+            Http.stringResolver
+                (\res ->
+                    case res of
+                        Http.GoodStatus_ _ _ ->
+                            Ok ()
+
+                        other ->
+                            Err res
+                )
         , timeout = Nothing
-        , tracker = Nothing
         }
 
 
@@ -948,7 +993,7 @@ webhookEncoder webhook =
     Encode.object <|
         [ ( "url", Encode.string (Url.toString webhook.url) )
         , ( "label"
-            -- This is a janky hack because Habitica seems to treat
+            -- This is a janky hack because Habitica treats
             -- empty string as "no label field provided" and therefore
             -- fails to clear the field.
           , if String.length webhook.label > 0 then
