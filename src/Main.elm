@@ -24,6 +24,13 @@ type alias Model =
 type alias LoggedInModel =
     { webhooks : WebhookStatus
     , editor : Maybe Editor
+    , confirm : Maybe Confirmation
+    }
+
+
+type alias Confirmation =
+    { text : String
+    , action : Msg
     }
 
 
@@ -168,13 +175,30 @@ type alias WebhookEditForm =
     }
 
 
+defaultWebhookEditForm : WebhookEditForm
+defaultWebhookEditForm =
+    { id = Nothing
+    , url = ""
+    , enabled = True
+    , label = ""
+    , type_ = EditTaskActivity
+    , taskActivityOptions = emptyEditableTaskActivity
+    , groupChatReceivedOptions = emptyEditableGroupChatReceived
+    , userActivityOptions = emptyEditableUserActivity
+    }
+
+
 type Msg
     = UpdateUserId UserUUID
     | UpdateUserApiKey UserApiKey
     | Login
     | ReceiveLoginResult (Result String Session)
     | SavedWebhook (Result (Http.Response String) ())
-    | Edit Webhook
+    | DeletedWebhook (Result Http.Error ())
+    | Edit (Maybe Webhook)
+    | Delete WebhookUUID
+    | ConfirmDelete Webhook
+    | ConfirmCancel
     | EditorSetEnabled Bool
     | EditorSetLabel String
     | EditorSetId String
@@ -232,35 +256,99 @@ update msg model =
             in
             ( model, loginCmd )
 
-        Edit webhook ->
+        DeletedWebhook result ->
+            let
+                -- TODO: this is just copied from above to reload the webhooks
+                --       and probably shouldn't be duplicated like this
+                loginCmd =
+                    requestUser model.userId model.userApiKey
+            in
+            ( model, loginCmd )
+
+        Edit maybeWebhook ->
             case model.session of
                 LoggedIn loggedInModel ->
-                    let
-                        webhookUuid =
-                            Maybe.map (\(WebhookUUID uuid) -> Uuid.toString uuid) webhook.id
+                    case maybeWebhook of
+                        Nothing ->
+                            ( { model
+                                | session =
+                                    LoggedIn
+                                        { loggedInModel | editor = Just ( defaultWebhookEditForm, [] ) }
+                              }
+                            , Cmd.none
+                            )
 
-                        hookOpts =
-                            typeToEditable webhook.type_
-                    in
+                        Just webhook ->
+                            let
+                                webhookUuid =
+                                    Maybe.map (\(WebhookUUID uuid) -> Uuid.toString uuid) webhook.id
+
+                                hookOpts =
+                                    typeToEditable webhook.type_
+                            in
+                            ( { model
+                                | session =
+                                    LoggedIn
+                                        { loggedInModel
+                                            | editor =
+                                                Just <|
+                                                    ( { id = webhookUuid
+                                                      , url = Url.toString webhook.url
+                                                      , enabled = webhook.enabled
+                                                      , label = webhook.label
+                                                      , type_ = hookOpts.editType
+                                                      , taskActivityOptions = hookOpts.opts.taskActivityOptions
+                                                      , groupChatReceivedOptions = hookOpts.opts.groupChatReceivedOptions
+                                                      , userActivityOptions = hookOpts.opts.userActivityOptions
+                                                      }
+                                                    , []
+                                                    )
+                                        }
+                              }
+                            , Cmd.none
+                            )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        Delete uuid ->
+            case model.session of
+                LoggedIn loggedInModel ->
+                    ( { model | session = LoggedIn { loggedInModel | webhooks = Loading } }
+                    , deleteWebhook model.userId model.userApiKey uuid
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        ConfirmDelete webhook ->
+            case model.session of
+                LoggedIn loggedInModel ->
                     ( { model
                         | session =
                             LoggedIn
                                 { loggedInModel
-                                    | editor =
-                                        Just <|
-                                            ( { id = webhookUuid
-                                              , url = Url.toString webhook.url
-                                              , enabled = webhook.enabled
-                                              , label = webhook.label
-                                              , type_ = hookOpts.editType
-                                              , taskActivityOptions = hookOpts.opts.taskActivityOptions
-                                              , groupChatReceivedOptions = hookOpts.opts.groupChatReceivedOptions
-                                              , userActivityOptions = hookOpts.opts.userActivityOptions
-                                              }
-                                            , []
-                                            )
+                                    | confirm =
+                                        webhook.id
+                                            |> Maybe.andThen
+                                                (\uuid ->
+                                                    Just <|
+                                                        Confirmation
+                                                            "Are you sure you want to delete this webhook?"
+                                                            (Delete uuid)
+                                                )
                                 }
                       }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        ConfirmCancel ->
+            case model.session of
+                LoggedIn loggedInModel ->
+                    ( { model | session = LoggedIn { loggedInModel | confirm = Nothing } }
                     , Cmd.none
                     )
 
@@ -324,6 +412,7 @@ update msg model =
                                             LoggedIn
                                                 { webhooks = Loading
                                                 , editor = Nothing
+                                                , confirm = Nothing
                                                 }
                                     }
 
@@ -645,24 +734,47 @@ webhookDashboard model =
             Element.text "Loading webhooks."
 
         Ready webhooks ->
-            case model.editor of
-                Nothing ->
+            case ( model.confirm, model.editor ) of
+                ( Just confirm, _ ) ->
                     Element.column [] <|
-                        List.map
-                            (\webhook ->
-                                Element.paragraph
-                                    []
-                                    [ Element.text (Debug.toString webhook)
-                                    , Input.button
-                                        []
-                                        { onPress = Just (Edit webhook)
-                                        , label = Element.text "Edit"
-                                        }
-                                    ]
-                            )
-                            webhooks
+                        [ Element.text confirm.text
+                        , Input.button []
+                            { onPress = Just confirm.action
+                            , label = Element.text "Do it"
+                            }
+                        , Input.button []
+                            { onPress = Just ConfirmCancel
+                            , label = Element.text "Cancel"
+                            }
+                        ]
 
-                Just editor ->
+                ( Nothing, Nothing ) ->
+                    Element.column [] <|
+                        [ Input.button []
+                            { onPress = Just (Edit Nothing)
+                            , label = Element.text "Create webhook"
+                            }
+                        ]
+                            ++ List.map
+                                (\webhook ->
+                                    Element.paragraph
+                                        []
+                                        [ Element.text (Debug.toString webhook)
+                                        , Input.button
+                                            []
+                                            { onPress = Just (Edit <| Just webhook)
+                                            , label = Element.text "Edit"
+                                            }
+                                        , Input.button
+                                            []
+                                            { onPress = Just (ConfirmDelete webhook)
+                                            , label = Element.text "Delete"
+                                            }
+                                        ]
+                                )
+                                webhooks
+
+                ( Nothing, Just editor ) ->
                     let
                         ( fields, errors ) =
                             editor
@@ -838,6 +950,22 @@ requestUser (UserUUID uuid) (UserApiKey apiKey) =
         }
 
 
+deleteWebhook : UserUUID -> UserApiKey -> WebhookUUID -> Cmd Msg
+deleteWebhook (UserUUID userUuid) (UserApiKey apiKey) (WebhookUUID uuid) =
+    Http.request
+        { method = "DELETE"
+        , headers =
+            [ Http.header "x-api-user" userUuid
+            , Http.header "x-api-key" apiKey
+            ]
+        , url = "https://habitica.com/api/v3/user/webhook/" ++ Uuid.toString uuid
+        , body = Http.emptyBody
+        , expect = Http.expectWhatever DeletedWebhook
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
 
 {- This is a hack fix to address a Habitica API bug where changing a webhook's options
    doesn't take unless you are also changing the type of the webhook. This wrapper calls
@@ -866,8 +994,13 @@ saveWebhookWrapper uuid apiKey webhook =
                         , leveledUp = False
                         }
     in
-    saveWebhook uuid apiKey { webhook | type_ = tempType }
-        |> Task.andThen (\_ -> saveWebhook uuid apiKey webhook)
+    case webhook.id of
+        Nothing ->
+            saveWebhook uuid apiKey webhook
+
+        Just _ ->
+            saveWebhook uuid apiKey { webhook | type_ = tempType }
+                |> Task.andThen (\_ -> saveWebhook uuid apiKey webhook)
 
 
 saveWebhook : UserUUID -> UserApiKey -> Webhook -> Task (Http.Response String) ()
@@ -887,9 +1020,6 @@ saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
 
         encodedWebhook =
             webhookEncoder webhook
-
-        debugPrint =
-            Debug.log "encoded webhook" <| Encode.encode 4 encodedWebhook
     in
     Http.task
         { method = method
@@ -921,7 +1051,7 @@ loginDecoder =
             if success then
                 Decode.at
                     [ "data", "webhooks" ]
-                    (Decode.map (\webhook -> LoggedIn <| LoggedInModel (Ready webhook) Nothing) <|
+                    (Decode.map (\webhook -> LoggedIn <| LoggedInModel (Ready webhook) Nothing Nothing) <|
                         Decode.list webhookDecoder
                     )
 
