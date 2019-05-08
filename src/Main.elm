@@ -683,13 +683,21 @@ mapUserActivityOptions f =
 theme =
     { text =
         { normal = Element.rgb 1 1 1
-        , error = Element.rgb255 150 0 0
+        , error = Element.rgb255 180 0 0
+        , faded = Element.rgb255 125 125 125
+        , link = Element.rgb255 180 0 0
+        , linkGlow = Element.rgb 1 1 1
+        , enabled = Element.rgb 0.2 0.8 0.2
         }
     , button =
         { yes = Element.rgb255 90 0 0
         , yesText = Element.rgb 1 1 1
-        , no = Element.rgb 0 0 0 --TODO: pick color
-        , noText = Element.rgb 0 0 0 --TODO: pick color
+        , yesHover = Element.rgb255 70 0 0
+        , yesHoverGlow = Element.rgb 0.5 0.5 0.5
+        , no = Element.rgb 0.5 0.5 0.5
+        , noText = Element.rgb 0 0 0
+        , noHover = Element.rgb 0.3 0.3 0.3
+        , noHoverGlow = Element.rgb 0.5 0.5 0.5
         }
     , input =
         { background = Element.rgb255 50 50 50
@@ -698,6 +706,10 @@ theme =
         }
     , page =
         { background = Element.rgb255 10 10 10 }
+    , misc =
+        { widget = Element.rgb255 20 20 20
+        , widgetShadow = Element.rgba 0 0 0 0.4
+        }
     }
 
 
@@ -714,6 +726,15 @@ view model =
 
             _ ->
                 loginPage model
+
+
+contentColumn : List (Element Msg) -> Element Msg
+contentColumn =
+    Element.column
+        [ Element.centerX
+        , Element.centerY
+        , Element.spacing 10
+        ]
 
 
 loginPage : Model -> Element Msg
@@ -740,17 +761,8 @@ loginPage model =
         (UserApiKey apiKey) =
             model.userApiKey
     in
-    Element.column
-        [ Element.centerX
-        , Element.centerY
-        , Element.spacing 10
-        ]
-        [ Element.el
-            [ Element.centerX
-            , Region.heading 1
-            , Font.size 26
-            ]
-            (Element.text "Habitica Webhook Editor")
+    contentColumn
+        [ h1 "Habitica Webhook Editor"
         , Input.username
             [ Element.htmlAttribute (A.name "username")
             , BG.color theme.input.background
@@ -774,18 +786,10 @@ loginPage model =
             , label = Input.labelHidden "API Key"
             , show = False
             }
-        , Input.button
-            [ Element.centerX
-            , BG.color theme.button.yes
-            , Element.padding 10
-            , Font.color theme.button.yesText
-            , Border.rounded 3
-            , Element.width Element.fill
-            , Font.center
-            ]
-            { onPress = Just Login
-            , label = Element.text "Login"
-            }
+        , yesButton
+            [ Element.width Element.fill ]
+            (Just Login)
+            "Login"
         , Element.el
             [ Element.width Element.fill
             , Font.size 16
@@ -807,58 +811,34 @@ inputPlaceholder txt =
 
 webhookDashboard : LoggedInModel -> Element Msg
 webhookDashboard model =
-    case model.webhooks of
-        Loading ->
-            Element.text "Loading webhooks."
+    contentColumn <|
+        case model.webhooks of
+            Loading ->
+                [ Element.el
+                    [ Element.centerX
+                    , Element.centerY
+                    ]
+                    (Element.text "Loading webhooks.")
+                ]
 
-        Ready webhooks ->
-            case ( model.confirm, model.editor ) of
-                ( Just confirm, _ ) ->
-                    Element.column [] <|
+            Ready webhooks ->
+                case ( model.confirm, model.editor ) of
+                    ( Just confirm, _ ) ->
                         [ Element.text confirm.text
-                        , Input.button []
-                            { onPress = Just confirm.action
-                            , label = Element.text "Do it"
-                            }
-                        , Input.button []
-                            { onPress = Just ConfirmCancel
-                            , label = Element.text "Cancel"
-                            }
+                        , yesButton [] (Just confirm.action) "Yes"
+                        , noButton [] (Just ConfirmCancel) "Cancel"
                         ]
 
-                ( Nothing, Nothing ) ->
-                    Element.column [] <|
-                        [ Input.button []
-                            { onPress = Just (Edit Nothing)
-                            , label = Element.text "Create webhook"
-                            }
+                    ( Nothing, Nothing ) ->
+                        [ yesButton [ Element.centerX ] (Just (Edit Nothing)) "Create webhook"
                         ]
-                            ++ List.map
-                                (\webhook ->
-                                    Element.paragraph
-                                        []
-                                        [ Element.text (Debug.toString webhook)
-                                        , Input.button
-                                            []
-                                            { onPress = Just (Edit <| Just webhook)
-                                            , label = Element.text "Edit"
-                                            }
-                                        , Input.button
-                                            []
-                                            { onPress = Just (ConfirmDelete webhook)
-                                            , label = Element.text "Delete"
-                                            }
-                                        ]
-                                )
-                                webhooks
+                            ++ List.map webhookView webhooks
 
-                ( Nothing, Just editor ) ->
-                    let
-                        ( fields, errors ) =
-                            editor
-                    in
-                    Element.column
-                        []
+                    ( Nothing, Just editor ) ->
+                        let
+                            ( fields, errors ) =
+                                editor
+                        in
                         [ Element.column [] <| List.map Element.text errors
                         , Input.checkbox []
                             { onChange = EditorSetEnabled
@@ -959,17 +939,166 @@ webhookDashboard model =
                                     , checkbox EditorSetOptPetHatched opts.petHatched "petHatched"
                                     , checkbox EditorSetOptLeveledUp opts.leveledUp "leveledUp"
                                     ]
-                        , Input.button
-                            []
-                            { onPress = Just EditorSubmit
-                            , label = Element.text "Submit"
-                            }
-                        , Input.button
-                            []
-                            { onPress = Just EditorCancel
-                            , label = Element.text "Cancel"
-                            }
+                        , Element.row
+                            [ Element.spacing 10
+                            , Element.alignRight
+                            ]
+                            [ yesButton [] (Just EditorSubmit) "Submit"
+                            , noButton [] (Just EditorCancel) "Cancel"
+                            ]
                         ]
+
+
+webhookView : Webhook -> Element Msg
+webhookView webhook =
+    let
+        labelTxt =
+            if String.trim webhook.label == "" then
+                "Unlabeled webhook"
+
+            else
+                webhook.label
+
+        idTxt =
+            case webhook.id of
+                Nothing ->
+                    "No ID (if you see this, something went wrong)"
+
+                Just (WebhookUUID uuid) ->
+                    Uuid.toString uuid
+
+        boolOpt txt enabled =
+            Element.el
+                (if enabled then
+                    [ Font.color theme.text.enabled
+                    , Font.bold
+                    ]
+
+                 else
+                    [ Font.color theme.text.faded
+                    , Font.italic
+                    ]
+                )
+                (Element.text txt)
+
+        optPara =
+            List.intersperse (Element.text " ")
+                >> Element.paragraph
+                    [ Font.size 16 ]
+
+        ( type_, optsElem ) =
+            case webhook.type_ of
+                TaskActivity opts ->
+                    ( "taskActivity"
+                    , optPara
+                        [ boolOpt "created" opts.created
+                        , boolOpt "updated" opts.updated
+                        , boolOpt "deleted" opts.deleted
+                        , boolOpt "scored" opts.scored
+                        , boolOpt "checklistScored" opts.checklistScored
+                        ]
+                    )
+
+                GroupChatReceived opts ->
+                    let
+                        (GroupUUID groupId) =
+                            opts.groupId
+                    in
+                    ( "groupChatReceived"
+                    , optPara
+                        [ Element.text <| "groupId: " ++ Uuid.toString groupId ]
+                    )
+
+                UserActivity opts ->
+                    ( "userActivity"
+                    , optPara
+                        [ boolOpt "mountRaised" opts.mountRaised
+                        , boolOpt "petHatched" opts.petHatched
+                        , boolOpt "leveledUp" opts.leveledUp
+                        ]
+                    )
+    in
+    Element.column
+        ([ Border.rounded 3
+         , Element.spacing 10
+         , Element.padding 10
+         , Element.width (Element.fill |> Element.maximum 800)
+         ]
+            ++ (if not webhook.enabled then
+                    [ Border.dashed
+                    , Border.color theme.misc.widget
+                    , Border.width 1
+                    ]
+
+                else
+                    [ BG.color theme.misc.widget
+                    , Border.shadow
+                        { offset = ( 3, 3 )
+                        , size = 4
+                        , blur = 5
+                        , color = theme.misc.widgetShadow
+                        }
+                    ]
+               )
+        )
+        [ Element.column
+            [ Element.width Element.fill
+            , Element.spacing 4
+            ]
+            [ Element.row
+                [ Element.width Element.fill
+                , Element.spacing 30
+                ]
+                [ Element.paragraph
+                    (if not webhook.enabled then
+                        [ Font.color theme.text.faded
+                        , Font.italic
+                        ]
+
+                     else
+                        []
+                    )
+                    [ h2 labelTxt ]
+                , Element.row
+                    [ Element.alignRight
+                    , Element.alignTop
+                    , Element.spacing 10
+                    ]
+                    [ linkButton [] (Just (Edit <| Just webhook)) "Edit"
+                    , linkButton [] (Just (ConfirmDelete webhook)) "Delete"
+                    ]
+                ]
+            , linkButton [] Nothing (Url.toString webhook.url)
+            ]
+        , Element.column
+            [ Font.family [ Font.typeface "Courier New" ]
+            , Font.size 18
+            , Element.spacing 4
+            ]
+            [ Element.el
+                []
+                (Element.text type_)
+            , Element.wrappedRow
+                [ Element.paddingEach
+                    { left = 30
+                    , right = 0
+                    , top = 0
+                    , bottom = 0
+                    }
+                ]
+                [ Element.text "[ "
+                , optsElem
+                , Element.text " ]"
+                ]
+            ]
+        , Element.el
+            [ Font.size 14
+            , Font.color theme.text.faded
+            , Element.width Element.fill
+            , Font.alignRight
+            ]
+            (Element.text idTxt)
+        ]
 
 
 checkbox : (Bool -> msg) -> Bool -> String -> Element msg
@@ -986,6 +1115,83 @@ checkbox msg isChecked labelTxt =
         , checked = isChecked
         , label = Input.labelLeft [] (Element.text labelTxt)
         }
+
+
+button : List (Element.Attribute Msg) -> Maybe Msg -> String -> Element Msg
+button extraAttrs action text =
+    Input.button
+        ([ Element.padding 10
+         , Border.rounded 3
+         , Font.center
+         ]
+            ++ extraAttrs
+        )
+        { onPress = action
+        , label = Element.text text
+        }
+
+
+yesButton : List (Element.Attribute Msg) -> Maybe Msg -> String -> Element Msg
+yesButton extraAttrs =
+    button <|
+        [ BG.color theme.button.yes
+        , Font.color theme.button.yesText
+        , Element.mouseOver
+            [ BG.color theme.button.yesHover
+            , Border.glow theme.button.yesHoverGlow 2
+            ]
+        ]
+            ++ extraAttrs
+
+
+noButton : List (Element.Attribute Msg) -> Maybe Msg -> String -> Element Msg
+noButton extraAttrs =
+    button <|
+        [ BG.color theme.button.no
+        , Font.color theme.button.noText
+        , Element.mouseOver
+            [ BG.color theme.button.noHover
+            , Border.glow theme.button.noHoverGlow 2
+            ]
+        ]
+            ++ extraAttrs
+
+
+linkButton : List (Element.Attribute Msg) -> Maybe Msg -> String -> Element Msg
+linkButton extraAttrs action text =
+    Input.button
+        ([ Font.color theme.text.link
+         , Font.size 18
+         , Element.mouseOver
+            [ Font.glow theme.text.linkGlow 10
+            ]
+         ]
+            ++ extraAttrs
+        )
+        { onPress = action
+        , label = Element.text text
+        }
+
+
+h : Int -> List (Element.Attribute Msg) -> String -> Element Msg
+h n extraAttrs =
+    \text ->
+        Element.el
+            (extraAttrs ++ [ Region.heading n ])
+            (Element.text text)
+
+
+h1 : String -> Element Msg
+h1 =
+    h 1 [ Element.centerX, Font.size 32 ]
+
+
+h2 : String -> Element Msg
+h2 =
+    h 2
+        [ Font.size 28
+        , Font.family [ Font.typeface "Trebuchet MS" ]
+        ]
 
 
 customExpectJson : (Result String a -> msg) -> Decoder a -> Http.Expect msg
