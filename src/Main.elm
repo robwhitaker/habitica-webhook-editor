@@ -763,23 +763,15 @@ loginPage model =
     in
     contentColumn
         [ h1 "Habitica Webhook Editor"
-        , Input.username
-            [ Element.htmlAttribute (A.name "username")
-            , BG.color theme.input.background
-            , Font.color theme.input.text
-            , Border.width 0
-            ]
+        , textInput Input.username
+            [ Element.htmlAttribute (A.name "username") ]
             { onChange = UpdateUserId << UserUUID
             , text = userId
             , placeholder = inputPlaceholder "User ID"
             , label = Input.labelHidden "User ID"
             }
-        , Input.currentPassword
-            [ Element.htmlAttribute (A.name "password")
-            , BG.color theme.input.background
-            , Font.color theme.input.text
-            , Border.width 0
-            ]
+        , textInput Input.currentPassword
+            [ Element.htmlAttribute (A.name "password") ]
             { onChange = UpdateUserApiKey << UserApiKey
             , text = apiKey
             , placeholder = inputPlaceholder "API Key"
@@ -799,154 +791,29 @@ loginPage model =
         ]
 
 
-inputPlaceholder : String -> Maybe (Input.Placeholder Msg)
-inputPlaceholder txt =
-    Just <|
-        Input.placeholder
-            [ Font.center
-            , Font.color theme.input.placeholderText
-            ]
-            (Element.text txt)
+loading : List (Element Msg)
+loading =
+    [ Element.el
+        [ Element.centerX
+        , Element.centerY
+        ]
+        (Element.text "Loading webhooks.")
+    ]
 
 
-webhookDashboard : LoggedInModel -> Element Msg
-webhookDashboard model =
-    contentColumn <|
-        case model.webhooks of
-            Loading ->
-                [ Element.el
-                    [ Element.centerX
-                    , Element.centerY
-                    ]
-                    (Element.text "Loading webhooks.")
-                ]
+confirmation : Confirmation -> List (Element Msg)
+confirmation confirm =
+    [ Element.text confirm.text
+    , yesButton [] (Just confirm.action) "Yes"
+    , noButton [] (Just ConfirmCancel) "Cancel"
+    ]
 
-            Ready webhooks ->
-                case ( model.confirm, model.editor ) of
-                    ( Just confirm, _ ) ->
-                        [ Element.text confirm.text
-                        , yesButton [] (Just confirm.action) "Yes"
-                        , noButton [] (Just ConfirmCancel) "Cancel"
-                        ]
 
-                    ( Nothing, Nothing ) ->
-                        [ yesButton [ Element.centerX ] (Just (Edit Nothing)) "Create webhook"
-                        ]
-                            ++ List.map webhookView webhooks
-
-                    ( Nothing, Just editor ) ->
-                        let
-                            ( fields, errors ) =
-                                editor
-                        in
-                        [ Element.column [] <| List.map Element.text errors
-                        , Input.checkbox []
-                            { onChange = EditorSetEnabled
-                            , icon =
-                                \bool ->
-                                    if bool then
-                                        Element.text "☑"
-
-                                    else
-                                        Element.text "☐"
-                            , checked = fields.enabled
-                            , label = Input.labelLeft [] (Element.text "Enabled")
-                            }
-                        , Input.text
-                            []
-                            { onChange = EditorSetLabel
-                            , text = fields.label
-                            , placeholder = Nothing
-                            , label = Input.labelLeft [] (Element.text "Label")
-                            }
-                        , Element.text
-                            (Maybe.withDefault "New Webhook." fields.id)
-                        , Input.text
-                            []
-                            { onChange = EditorSetUrl
-                            , text = fields.url
-                            , placeholder = Nothing
-                            , label = Input.labelLeft [] (Element.text "URL")
-                            }
-                        , Input.radioRow
-                            []
-                            { onChange = EditorSetType
-                            , options =
-                                [ Input.optionWith EditTaskActivity <|
-                                    \state ->
-                                        if state /= Input.Selected then
-                                            Element.text "[ ] taskActivity"
-
-                                        else
-                                            Element.text <| "[x] taskActivity"
-                                , Input.optionWith EditGroupChatReceived <|
-                                    \state ->
-                                        if state /= Input.Selected then
-                                            Element.text "[ ] groupChatReceived"
-
-                                        else
-                                            Element.text <| "[x] groupChatReceived"
-                                , Input.optionWith EditUserActivity <|
-                                    \state ->
-                                        if state /= Input.Selected then
-                                            Element.text "[ ] userActivity"
-
-                                        else
-                                            Element.text <| "[x] userActivity"
-                                ]
-                            , selected = Just fields.type_
-                            , label = Input.labelAbove [] (Element.text "Webhook Type")
-                            }
-                        , case fields.type_ of
-                            EditTaskActivity ->
-                                let
-                                    (EditableTaskActivityOptions opts) =
-                                        fields.taskActivityOptions
-                                in
-                                Element.column
-                                    []
-                                    [ checkbox EditorSetOptCreated opts.created "created"
-                                    , checkbox EditorSetOptUpdated opts.updated "updated"
-                                    , checkbox EditorSetOptDeleted opts.deleted "deleted"
-                                    , checkbox EditorSetOptScored opts.scored "scored"
-                                    , checkbox EditorSetOptChecklistScored opts.checklistScored "checklistScored"
-                                    ]
-
-                            EditGroupChatReceived ->
-                                let
-                                    (EditableGroupChatReceivedOptions opts) =
-                                        fields.groupChatReceivedOptions
-                                in
-                                Element.column
-                                    []
-                                    [ Input.text
-                                        []
-                                        { onChange = EditorSetOptGroupId
-                                        , text = opts.groupId
-                                        , placeholder = Nothing
-                                        , label = Input.labelLeft [] (Element.text "Group ID")
-                                        }
-                                    ]
-
-                            EditUserActivity ->
-                                let
-                                    (EditableUserActivityOptions opts) =
-                                        fields.userActivityOptions
-                                in
-                                Element.column
-                                    []
-                                    [ checkbox EditorSetOptMountRaised opts.mountRaised "mountRaised"
-                                    , checkbox EditorSetOptPetHatched opts.petHatched "petHatched"
-                                    , checkbox EditorSetOptLeveledUp opts.leveledUp "leveledUp"
-                                    ]
-                        , Element.row
-                            [ Element.spacing 10
-                            , Element.alignRight
-                            ]
-                            [ yesButton [] (Just EditorSubmit) "Submit"
-                            , noButton [] (Just EditorCancel) "Cancel"
-                            ]
-                        ]
+webhookList : List Webhook -> List (Element Msg)
+webhookList webhooks =
+    [ yesButton [ Element.centerX ] (Just (Edit Nothing)) "Create webhook"
+    ]
+        ++ List.map webhookView webhooks
 
 
 webhookView : Webhook -> Element Msg
@@ -1101,20 +968,194 @@ webhookView webhook =
         ]
 
 
-checkbox : (Bool -> msg) -> Bool -> String -> Element msg
-checkbox msg isChecked labelTxt =
-    Input.checkbox []
-        { onChange = msg
-        , icon =
-            \bool ->
-                if bool then
-                    Element.text "☑"
+editorFieldRow : String -> (String -> List (Element.Attribute Msg) -> Element Msg) -> Element Msg
+editorFieldRow label fieldFn =
+    Element.row
+        [ Element.width Element.fill ]
+        [ Element.el [ Element.width (Element.fillPortion 3) ]
+            (Element.text label)
+        , fieldFn label
+            [ Element.width (Element.fillPortion 6) ]
+        ]
+
+
+hookTypeOption : String -> Input.OptionState -> Element Msg
+hookTypeOption hookType optState =
+    Element.el
+        ([ Element.paddingXY 15 8
+         ]
+            ++ (if optState == Input.Selected then
+                    [ Font.color theme.text.enabled
+                    ]
 
                 else
-                    Element.text "☐"
-        , checked = isChecked
-        , label = Input.labelLeft [] (Element.text labelTxt)
-        }
+                    [ Font.color theme.text.faded
+                    , BG.color theme.page.background
+                    ]
+               )
+        )
+        (Element.text hookType)
+
+
+webhookTypeEditor : WebhookEditForm -> Element Msg
+webhookTypeEditor fields =
+    Element.column
+        [ Element.spacing 4
+        , Element.width Element.fill
+        ]
+        [ Element.el
+            [ Font.size 22 ]
+            (Element.text "Webhook Type")
+        , Element.column
+            [ BG.color theme.misc.widget
+            , Border.rounded 3
+            , Element.clip
+            , Element.spacing 10
+            ]
+            [ Input.radioRow
+                []
+                { onChange = EditorSetType
+                , options =
+                    [ Input.optionWith EditTaskActivity (hookTypeOption "taskActivity")
+                    , Input.optionWith EditGroupChatReceived (hookTypeOption "groupChatReceived")
+                    , Input.optionWith EditUserActivity (hookTypeOption "userActivity")
+                    ]
+                , selected = Just fields.type_
+                , label = Input.labelHidden "Webhook Type"
+                }
+            , Element.column
+                [ Element.paddingXY 15 8
+                , Element.width Element.fill
+                , Font.size 18
+                ]
+              <|
+                case fields.type_ of
+                    EditTaskActivity ->
+                        let
+                            (EditableTaskActivityOptions opts) =
+                                fields.taskActivityOptions
+                        in
+                        [ checkboxFieldRow EditorSetOptCreated opts.created "created"
+                        , checkboxFieldRow EditorSetOptUpdated opts.updated "updated"
+                        , checkboxFieldRow EditorSetOptDeleted opts.deleted "deleted"
+                        , checkboxFieldRow EditorSetOptScored opts.scored "scored"
+                        , checkboxFieldRow EditorSetOptChecklistScored opts.checklistScored "checklistScored"
+                        ]
+
+                    EditGroupChatReceived ->
+                        let
+                            (EditableGroupChatReceivedOptions opts) =
+                                fields.groupChatReceivedOptions
+                        in
+                        [ editorFieldRow "Group ID" <|
+                            \label extraAttrs ->
+                                textInput Input.text
+                                    extraAttrs
+                                    { onChange = EditorSetOptGroupId
+                                    , text = opts.groupId
+                                    , placeholder = Nothing
+                                    , label = Input.labelHidden label
+                                    }
+                        ]
+
+                    EditUserActivity ->
+                        let
+                            (EditableUserActivityOptions opts) =
+                                fields.userActivityOptions
+                        in
+                        [ checkboxFieldRow EditorSetOptMountRaised opts.mountRaised "mountRaised"
+                        , checkboxFieldRow EditorSetOptPetHatched opts.petHatched "petHatched"
+                        , checkboxFieldRow EditorSetOptLeveledUp opts.leveledUp "leveledUp"
+                        ]
+            ]
+        ]
+
+
+webhookEditor : Editor -> List (Element Msg)
+webhookEditor editor =
+    let
+        ( fields, errors ) =
+            editor
+    in
+    [ Element.column [] <| List.map Element.text errors
+    , Element.column
+        [ Element.spacing 20 ]
+        [ Element.column
+            [ Element.width Element.fill
+            , Element.spacing 10
+            ]
+            [ checkboxFieldRow EditorSetEnabled fields.enabled "Enabled"
+            , editorFieldRow "Label" <|
+                \label extraAttrs ->
+                    textInput Input.text
+                        extraAttrs
+                        { onChange = EditorSetLabel
+                        , text = fields.label
+                        , placeholder = Nothing
+                        , label = Input.labelHidden label
+                        }
+            , editorFieldRow "URL" <|
+                \label extraAttrs ->
+                    textInput Input.text
+                        extraAttrs
+                        { onChange = EditorSetUrl
+                        , text = fields.url
+                        , placeholder = Nothing
+                        , label = Input.labelHidden label
+                        }
+            ]
+        , webhookTypeEditor fields
+        , Element.row
+            [ Element.spacing 10
+            , Element.alignRight
+            ]
+            [ yesButton [] (Just EditorSubmit) "Submit"
+            , noButton [] (Just EditorCancel) "Cancel"
+            ]
+        ]
+    ]
+
+
+webhookDashboard : LoggedInModel -> Element Msg
+webhookDashboard model =
+    contentColumn <|
+        case model.webhooks of
+            Loading ->
+                loading
+
+            Ready webhooks ->
+                case ( model.confirm, model.editor ) of
+                    ( Just confirm, _ ) ->
+                        confirmation confirm
+
+                    ( Nothing, Nothing ) ->
+                        webhookList webhooks
+
+                    ( Nothing, Just editor ) ->
+                        webhookEditor editor
+
+
+
+-- Reusable styled elements
+
+
+checkboxFieldRow : (Bool -> Msg) -> Bool -> String -> Element Msg
+checkboxFieldRow msg checked label =
+    editorFieldRow label <|
+        \label_ extraAttrs ->
+            Input.checkbox
+                ([ Font.size 32 ] ++ extraAttrs)
+                { onChange = msg
+                , icon =
+                    \bool ->
+                        if bool then
+                            Element.text "☑"
+
+                        else
+                            Element.text "☐"
+                , checked = checked
+                , label = Input.labelHidden label_
+                }
 
 
 button : List (Element.Attribute Msg) -> Maybe Msg -> String -> Element Msg
@@ -1192,6 +1233,34 @@ h2 =
         [ Font.size 28
         , Font.family [ Font.typeface "Trebuchet MS" ]
         ]
+
+
+type alias TextInputFn msg opts =
+    List (Element.Attribute msg)
+    -> opts
+    -> Element msg
+
+
+textInput : TextInputFn Msg opts -> TextInputFn Msg opts
+textInput input extraAttrs opts =
+    input
+        ([ BG.color theme.input.background
+         , Font.color theme.input.text
+         , Border.width 0
+         ]
+            ++ extraAttrs
+        )
+        opts
+
+
+inputPlaceholder : String -> Maybe (Input.Placeholder Msg)
+inputPlaceholder txt =
+    Just <|
+        Input.placeholder
+            [ Font.center
+            , Font.color theme.input.placeholderText
+            ]
+            (Element.text txt)
 
 
 customExpectJson : (Result String a -> msg) -> Decoder a -> Http.Expect msg
