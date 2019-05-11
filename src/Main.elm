@@ -29,7 +29,13 @@ type alias LoggedInModel =
     { webhooks : WebhookStatus
     , editor : Maybe Editor
     , confirm : Maybe Confirmation
+    , requestError : Maybe WebhookListError
     }
+
+
+type WebhookListError
+    = ErrorSeen String
+    | ErrorUnseen String
 
 
 type alias Confirmation =
@@ -62,8 +68,16 @@ type Session
 
 
 type WebhookStatus
-    = Loading
+    = Saving SaveAction
+    | Reloading
+    | FailedLoading Http.Error
     | Ready (List Webhook)
+
+
+type SaveAction
+    = SaveDelete
+    | SaveCreate
+    | SaveUpdate
 
 
 type alias LoginFailureMessage =
@@ -199,6 +213,8 @@ type Msg
     | UpdateUserApiKey UserApiKey
     | Login
     | ReceiveLoginResult (Result String Session)
+    | ReloadWebhooks
+    | ReloadedWebhooks (Result Http.Error (List Webhook))
     | SavedWebhook (Result (Http.Response String) ())
     | DeletedWebhook (Result Http.Error ())
     | Edit (Maybe Webhook)
@@ -235,7 +251,7 @@ update msg model =
         Login ->
             let
                 loginCmd =
-                    requestUser model.userId model.userApiKey
+                    requestUserLogin model.userId model.userApiKey
             in
             ( { model | session = AttemptingLogin }, loginCmd )
 
@@ -254,113 +270,187 @@ update msg model =
                     , Cmd.none
                     )
 
-        SavedWebhook result ->
+        ReloadWebhooks ->
+            withLoggedInModel
+                (\loggedInModel ->
+                    ( { loggedInModel
+                        | webhooks = Reloading
+                      }
+                    , reloadWebhooks model.userId model.userApiKey
+                    )
+                )
+                model
+
+        ReloadedWebhooks result ->
             let
-                -- TODO: this is just copied from above to reload the webhooks
-                --       and probably shouldn't be duplicated like this
-                loginCmd =
-                    requestUser model.userId model.userApiKey
+                newModel =
+                    mapLoggedInModel
+                        (\loggedInModel ->
+                            case result of
+                                Err err ->
+                                    { loggedInModel | webhooks = FailedLoading err }
+
+                                Ok webhooks ->
+                                    { loggedInModel
+                                        | webhooks = Ready webhooks
+                                        , requestError =
+                                            case loggedInModel.requestError of
+                                                Nothing ->
+                                                    Nothing
+
+                                                Just (ErrorSeen _) ->
+                                                    Nothing
+
+                                                Just (ErrorUnseen txt) ->
+                                                    Just (ErrorSeen txt)
+                                    }
+                        )
+                        model
             in
-            ( model, loginCmd )
+            ( newModel, Cmd.none )
+
+        SavedWebhook result ->
+            withLoggedInModel
+                (\loggedInModel ->
+                    let
+                        reloadCmd =
+                            reloadWebhooks model.userId model.userApiKey
+                    in
+                    case result of
+                        Err _ ->
+                            -- TODO: It would make sense to do this before leaving the editor
+                            --       so the user doesn't lose their form data.
+                            ( { loggedInModel
+                                | requestError =
+                                    Just <|
+                                        ErrorUnseen
+                                            "There was an error saving your webhook. Please try again later."
+                              }
+                            , reloadCmd
+                            )
+
+                        Ok _ ->
+                            ( { loggedInModel
+                                | requestError = Nothing
+                                , webhooks = Reloading
+                              }
+                            , reloadCmd
+                            )
+                )
+                model
 
         DeletedWebhook result ->
-            let
-                -- TODO: this is just copied from above to reload the webhooks
-                --       and probably shouldn't be duplicated like this
-                loginCmd =
-                    requestUser model.userId model.userApiKey
-            in
-            ( model, loginCmd )
+            withLoggedInModel
+                (\loggedInModel ->
+                    let
+                        reloadCmd =
+                            reloadWebhooks model.userId model.userApiKey
+                    in
+                    case result of
+                        Err _ ->
+                            ( { loggedInModel
+                                | requestError =
+                                    Just <|
+                                        ErrorUnseen
+                                            "There was an error deleting your webhook. Please try again later."
+                              }
+                            , reloadCmd
+                            )
+
+                        Ok _ ->
+                            ( { loggedInModel
+                                | requestError = Nothing
+                                , webhooks = Reloading
+                              }
+                            , reloadCmd
+                            )
+                )
+                model
 
         Edit maybeWebhook ->
-            case model.session of
-                LoggedIn loggedInModel ->
-                    case maybeWebhook of
-                        Nothing ->
-                            ( { model
-                                | session =
-                                    LoggedIn
-                                        { loggedInModel | editor = Just ( defaultWebhookEditForm, [] ) }
-                              }
-                            , Cmd.none
-                            )
+            let
+                newModel =
+                    mapLoggedInModel
+                        (\loggedInModel ->
+                            case maybeWebhook of
+                                Nothing ->
+                                    { loggedInModel | editor = Just ( defaultWebhookEditForm, [] ) }
 
-                        Just webhook ->
-                            let
-                                webhookUuid =
-                                    Maybe.map (\(WebhookUUID uuid) -> Uuid.toString uuid) webhook.id
+                                Just webhook ->
+                                    let
+                                        webhookUuid =
+                                            Maybe.map (\(WebhookUUID uuid) -> Uuid.toString uuid) webhook.id
 
-                                hookOpts =
-                                    typeToEditable webhook.type_
-                            in
-                            ( { model
-                                | session =
-                                    LoggedIn
-                                        { loggedInModel
-                                            | editor =
-                                                Just <|
-                                                    ( { id = webhookUuid
-                                                      , url = Url.toString webhook.url
-                                                      , enabled = webhook.enabled
-                                                      , label = webhook.label
-                                                      , type_ = hookOpts.editType
-                                                      , taskActivityOptions = hookOpts.opts.taskActivityOptions
-                                                      , groupChatReceivedOptions = hookOpts.opts.groupChatReceivedOptions
-                                                      , userActivityOptions = hookOpts.opts.userActivityOptions
-                                                      }
-                                                    , []
-                                                    )
-                                        }
-                              }
-                            , Cmd.none
-                            )
-
-                _ ->
-                    ( model, Cmd.none )
+                                        hookOpts =
+                                            typeToEditable webhook.type_
+                                    in
+                                    { loggedInModel
+                                        | editor =
+                                            Just <|
+                                                ( { id = webhookUuid
+                                                  , url = Url.toString webhook.url
+                                                  , enabled = webhook.enabled
+                                                  , label = webhook.label
+                                                  , type_ = hookOpts.editType
+                                                  , taskActivityOptions = hookOpts.opts.taskActivityOptions
+                                                  , groupChatReceivedOptions = hookOpts.opts.groupChatReceivedOptions
+                                                  , userActivityOptions = hookOpts.opts.userActivityOptions
+                                                  }
+                                                , []
+                                                )
+                                    }
+                        )
+                        model
+            in
+            ( newModel, Cmd.none )
 
         Delete uuid ->
-            case model.session of
-                LoggedIn loggedInModel ->
-                    ( { model | session = LoggedIn { loggedInModel | webhooks = Loading } }
+            withLoggedInModel
+                (\loggedInModel ->
+                    ( { loggedInModel
+                        | webhooks = Saving SaveDelete
+                        , confirm = Nothing
+                      }
                     , deleteWebhook model.userId model.userApiKey uuid
                     )
-
-                _ ->
-                    ( model, Cmd.none )
+                )
+                model
 
         ConfirmDelete webhook ->
-            case model.session of
-                LoggedIn loggedInModel ->
-                    ( { model
-                        | session =
-                            LoggedIn
-                                { loggedInModel
-                                    | confirm =
-                                        webhook.id
-                                            |> Maybe.andThen
-                                                (\uuid ->
-                                                    Just <|
-                                                        Confirmation
-                                                            "Are you sure you want to delete this webhook?"
-                                                            (Delete uuid)
-                                                )
-                                }
-                      }
-                    , Cmd.none
-                    )
+            ( mapLoggedInModel
+                (\loggedInModel ->
+                    { loggedInModel
+                        | confirm =
+                            webhook.id
+                                |> Maybe.andThen
+                                    (\uuid ->
+                                        Just <|
+                                            Confirmation
+                                                "Are you sure you want to delete this webhook?"
+                                                (Delete uuid)
+                                    )
+                        , requestError =
+                            case loggedInModel.requestError of
+                                Nothing ->
+                                    Nothing
 
-                _ ->
-                    ( model, Cmd.none )
+                                Just (ErrorSeen _) ->
+                                    Nothing
+
+                                Just (ErrorUnseen txt) ->
+                                    Just (ErrorSeen txt)
+                    }
+                )
+                model
+            , Cmd.none
+            )
 
         ConfirmCancel ->
-            case model.session of
-                LoggedIn loggedInModel ->
-                    ( { model | session = LoggedIn { loggedInModel | confirm = Nothing } }
-                    , Cmd.none
-                    )
-
-                _ ->
-                    ( model, Cmd.none )
+            ( mapLoggedInModel
+                (\m -> { m | confirm = Nothing })
+                model
+            , Cmd.none
+            )
 
         EditorSetEnabled enabled ->
             ( mapEditorFormFields (\form -> { form | enabled = enabled }) model, Cmd.none )
@@ -417,32 +507,50 @@ update msg model =
                         Ok webhook ->
                             let
                                 newModel =
-                                    { model
-                                        | session =
-                                            LoggedIn
-                                                { webhooks = Loading
-                                                , editor = Nothing
-                                                , confirm = Nothing
-                                                }
+                                    { webhooks =
+                                        case webhook.id of
+                                            Nothing ->
+                                                Saving SaveCreate
+
+                                            _ ->
+                                                Saving SaveUpdate
+                                    , editor = Nothing
+                                    , confirm = Nothing
+                                    , requestError = Nothing
                                     }
 
                                 saveCmd =
                                     saveWebhookWrapper model.userId model.userApiKey webhook
                                         |> Task.attempt SavedWebhook
                             in
-                            ( newModel
-                            , saveCmd
-                            )
+                            withLoggedInModel
+                                (\_ ->
+                                    ( newModel
+                                    , saveCmd
+                                    )
+                                )
+                                model
 
         EditorCancel ->
-            case model.session of
-                LoggedIn loggedInModel ->
-                    ( { model | session = LoggedIn { loggedInModel | editor = Nothing } }
-                    , Cmd.none
-                    )
+            ( mapLoggedInModel
+                (\m ->
+                    { m
+                        | editor = Nothing
+                        , requestError =
+                            case m.requestError of
+                                Nothing ->
+                                    Nothing
 
-                _ ->
-                    ( model, Cmd.none )
+                                Just (ErrorSeen _) ->
+                                    Nothing
+
+                                Just (ErrorUnseen txt) ->
+                                    Just (ErrorSeen txt)
+                    }
+                )
+                model
+            , Cmd.none
+            )
 
 
 editorToWebhook : WebhookEditForm -> Result (List ValidationError) Webhook
@@ -599,25 +707,37 @@ typeToEditable type_ =
             }
 
 
-mapEditor : (Editor -> Editor) -> Model -> Model
-mapEditor f model =
+withLoggedInModel : (LoggedInModel -> ( LoggedInModel, Cmd msg )) -> Model -> ( Model, Cmd msg )
+withLoggedInModel f model =
     case model.session of
         LoggedIn loggedInModel ->
-            case loggedInModel.editor of
-                Nothing ->
-                    model
-
-                Just editForm ->
-                    { model
-                        | session =
-                            LoggedIn <|
-                                { loggedInModel
-                                    | editor = Just (f editForm)
-                                }
-                    }
+            let
+                ( newLoggedInModel, cmds ) =
+                    f loggedInModel
+            in
+            ( { model | session = LoggedIn newLoggedInModel }, cmds )
 
         _ ->
-            model
+            ( model, Cmd.none )
+
+
+mapLoggedInModel : (LoggedInModel -> LoggedInModel) -> Model -> Model
+mapLoggedInModel f model =
+    withLoggedInModel (\m -> ( f m, Cmd.none )) model |> Tuple.first
+
+
+mapEditor : (Editor -> Editor) -> Model -> Model
+mapEditor f =
+    mapLoggedInModel <|
+        \loggedInModel ->
+            case loggedInModel.editor of
+                Nothing ->
+                    loggedInModel
+
+                Just editForm ->
+                    { loggedInModel
+                        | editor = Just (f editForm)
+                    }
 
 
 mapEditorFormFields : (WebhookEditForm -> WebhookEditForm) -> Model -> Model
@@ -791,13 +911,13 @@ loginPage model =
         ]
 
 
-loading : List (Element Msg)
-loading =
+workingOn : String -> List (Element Msg)
+workingOn job =
     [ Element.el
         [ Element.centerX
         , Element.centerY
         ]
-        (Element.text "Loading webhooks.")
+        (Element.text job)
     ]
 
 
@@ -811,7 +931,13 @@ confirmation confirm =
 
 webhookList : List Webhook -> List (Element Msg)
 webhookList webhooks =
-    [ yesButton [ Element.centerX ] (Just (Edit Nothing)) "Create webhook"
+    [ Element.row
+        [ Element.centerX
+        , Element.spacing 10
+        ]
+        [ yesButton [] (Just (Edit Nothing)) "Create webhook"
+        , noButton [] (Just ReloadWebhooks) "Refresh"
+        ]
     ]
         ++ List.map webhookView webhooks
 
@@ -1120,8 +1246,20 @@ webhookDashboard : LoggedInModel -> Element Msg
 webhookDashboard model =
     contentColumn <|
         case model.webhooks of
-            Loading ->
-                loading
+            Reloading ->
+                workingOn "Fetching updated webhooks."
+
+            Saving SaveDelete ->
+                workingOn "Deleting webhook."
+
+            Saving SaveCreate ->
+                workingOn "Creating webhook."
+
+            Saving SaveUpdate ->
+                workingOn "Updating webhook."
+
+            FailedLoading err ->
+                workingOn "Failed to load webhooks."
 
             Ready webhooks ->
                 case ( model.confirm, model.editor ) of
@@ -1129,7 +1267,30 @@ webhookDashboard model =
                         confirmation confirm
 
                     ( Nothing, Nothing ) ->
-                        webhookList webhooks
+                        let
+                            showError err =
+                                case err of
+                                    ErrorSeen txt ->
+                                        txt
+
+                                    ErrorUnseen txt ->
+                                        txt
+
+                            errorBox =
+                                case model.requestError of
+                                    Nothing ->
+                                        Element.none
+
+                                    Just err ->
+                                        Element.el
+                                            [ Font.color theme.text.error
+                                            , Element.padding 10
+                                            , Font.size 18
+                                            , Element.centerX
+                                            ]
+                                            (Element.text <| showError err)
+                        in
+                        errorBox :: webhookList webhooks
 
                     ( Nothing, Just editor ) ->
                         webhookEditor editor
@@ -1288,8 +1449,8 @@ customExpectJson toMsg decoder =
                     Err "Something went wrong. Please try again later."
 
 
-requestUser : UserUUID -> UserApiKey -> Cmd Msg
-requestUser (UserUUID uuid) (UserApiKey apiKey) =
+requestUser : Http.Expect Msg -> UserUUID -> UserApiKey -> Cmd Msg
+requestUser expect (UserUUID uuid) (UserApiKey apiKey) =
     Http.request
         { method = "GET"
         , headers =
@@ -1298,10 +1459,20 @@ requestUser (UserUUID uuid) (UserApiKey apiKey) =
             ]
         , url = "https://habitica.com/api/v3/user"
         , body = Http.emptyBody
-        , expect = customExpectJson ReceiveLoginResult loginDecoder
+        , expect = expect
         , timeout = Nothing
         , tracker = Nothing
         }
+
+
+requestUserLogin : UserUUID -> UserApiKey -> Cmd Msg
+requestUserLogin =
+    requestUser (customExpectJson ReceiveLoginResult loginDecoder)
+
+
+reloadWebhooks : UserUUID -> UserApiKey -> Cmd Msg
+reloadWebhooks =
+    requestUser (Http.expectJson ReloadedWebhooks userResponseDecoder)
 
 
 deleteWebhook : UserUUID -> UserApiKey -> WebhookUUID -> Cmd Msg
@@ -1398,17 +1569,22 @@ saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
         }
 
 
+userResponseDecoder : Decoder (List Webhook)
+userResponseDecoder =
+    Decode.at [ "data", "webhooks" ] (Decode.list webhookDecoder)
+
+
 loginDecoder : Decoder Session
 loginDecoder =
     let
         handleLoginResult : Bool -> Decoder Session
         handleLoginResult success =
             if success then
-                Decode.at
-                    [ "data", "webhooks" ]
-                    (Decode.map (\webhook -> LoggedIn <| LoggedInModel (Ready webhook) Nothing Nothing) <|
-                        Decode.list webhookDecoder
+                Decode.map
+                    (\webhook ->
+                        LoggedIn <| LoggedInModel (Ready webhook) Nothing Nothing Nothing
                     )
+                    userResponseDecoder
 
             else
                 Decode.field "message" (Decode.map LoginFailure Decode.string)
