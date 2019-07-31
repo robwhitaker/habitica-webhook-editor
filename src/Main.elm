@@ -18,6 +18,24 @@ import Url exposing (Url)
 import Uuid exposing (Uuid)
 
 
+
+-- Constants
+
+
+appName : String
+appName =
+    "HabiticaWebhookEditor"
+
+
+maintainerId : String
+maintainerId =
+    "cab16cfa-e951-4dc3-a468-1abadc1dd109"
+
+
+
+-- Model
+
+
 type alias Model =
     { userId : UserUUID
     , userApiKey : UserApiKey
@@ -1456,6 +1474,7 @@ requestUser expect (UserUUID uuid) (UserApiKey apiKey) =
         , headers =
             [ Http.header "x-api-user" uuid
             , Http.header "x-api-key" apiKey
+            , Http.header "x-client" (maintainerId ++ "-" ++ appName)
             ]
         , url = "https://habitica.com/api/v3/user"
         , body = Http.emptyBody
