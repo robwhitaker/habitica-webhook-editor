@@ -49,6 +49,7 @@ type alias LoggedInModel =
     , editor : Maybe Editor
     , confirm : Maybe Confirmation
     , requestError : Maybe WebhookListError
+    , partyId : Maybe GroupUUID
     }
 
 
@@ -536,6 +537,7 @@ update msg model =
                                     , editor = Nothing
                                     , confirm = Nothing
                                     , requestError = Nothing
+                                    , partyId = Nothing
                                     }
 
                                 saveCmd =
@@ -543,8 +545,8 @@ update msg model =
                                         |> Task.attempt SavedWebhook
                             in
                             withLoggedInModel
-                                (\_ ->
-                                    ( newModel
+                                (\m ->
+                                    ( { newModel | partyId = m.partyId }
                                     , saveCmd
                                     )
                                 )
@@ -1210,8 +1212,8 @@ hookTypeOption hookType optState =
         (Element.text hookType)
 
 
-webhookTypeEditor : WebhookEditForm -> Element Msg
-webhookTypeEditor fields =
+webhookTypeEditor : Maybe GroupUUID -> WebhookEditForm -> Element Msg
+webhookTypeEditor partyId fields =
     Element.column
         [ Element.spacing 4
         , Element.width Element.fill
@@ -1269,6 +1271,18 @@ webhookTypeEditor fields =
                                     , placeholder = Nothing
                                     , label = Input.labelHidden label
                                     }
+                        , case partyId of
+                            Nothing ->
+                                Element.none
+
+                            Just (GroupUUID pId) ->
+                                linkButton
+                                    [ Element.alignRight
+                                    , Font.size 12
+                                    , Element.paddingEach { top = 10, right = 0, bottom = 0, left = 0 }
+                                    ]
+                                    (Just <| EditorSetOptGroupId (Uuid.toString pId))
+                                    "Use Party ID"
                         ]
 
                     EditUserActivity ->
@@ -1284,8 +1298,8 @@ webhookTypeEditor fields =
         ]
 
 
-webhookEditor : Editor -> List (Element Msg)
-webhookEditor editor =
+webhookEditor : Maybe GroupUUID -> Editor -> List (Element Msg)
+webhookEditor partyId editor =
     let
         ( fields, errors ) =
             editor
@@ -1317,7 +1331,7 @@ webhookEditor editor =
                         , label = Input.labelHidden label
                         }
             ]
-        , webhookTypeEditor fields
+        , webhookTypeEditor partyId fields
         , Element.row
             [ Element.spacing 10
             , Element.alignRight
@@ -1380,7 +1394,7 @@ webhookDashboard model =
                         errorBox :: webhookList webhooks
 
                     ( Nothing, Just editor ) ->
-                        webhookEditor editor
+                        webhookEditor model.partyId editor
 
 
 
@@ -1560,7 +1574,7 @@ requestUserLogin =
 
 reloadWebhooks : UserUUID -> UserApiKey -> Cmd Msg
 reloadWebhooks =
-    requestUser (Http.expectJson ReloadedWebhooks userResponseDecoder)
+    requestUser (Http.expectJson ReloadedWebhooks (Decode.map Tuple.first userResponseDecoder))
 
 
 deleteWebhook : UserUUID -> UserApiKey -> WebhookUUID -> Cmd Msg
@@ -1657,9 +1671,14 @@ saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
         }
 
 
-userResponseDecoder : Decoder (List Webhook)
+userResponseDecoder : Decoder ( List Webhook, Maybe GroupUUID )
 userResponseDecoder =
-    Decode.at [ "data", "webhooks" ] (Decode.list webhookDecoder)
+    Decode.map2
+        Tuple.pair
+        (Decode.at [ "data", "webhooks" ] (Decode.list webhookDecoder))
+        (Decode.maybe
+            (Decode.at [ "data", "party", "_id" ] (Decode.map GroupUUID Uuid.decoder))
+        )
 
 
 loginDecoder : Decoder Session
@@ -1669,8 +1688,8 @@ loginDecoder =
         handleLoginResult success =
             if success then
                 Decode.map
-                    (\webhook ->
-                        LoggedIn <| LoggedInModel (Ready webhook) Nothing Nothing Nothing
+                    (\( webhook, maybePartyId ) ->
+                        LoggedIn <| LoggedInModel (Ready webhook) Nothing Nothing Nothing maybePartyId
                     )
                     userResponseDecoder
 
