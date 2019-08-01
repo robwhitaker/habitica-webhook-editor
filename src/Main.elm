@@ -13,6 +13,7 @@ import Html.Events as Event
 import Http
 import Json.Decode as Decode exposing (Decoder)
 import Json.Encode as Encode exposing (Value)
+import List.Nonempty as Nonempty exposing (Nonempty)
 import Task exposing (Task)
 import Url exposing (Url)
 import Uuid exposing (Uuid)
@@ -997,37 +998,66 @@ webhookView webhook =
                 >> Element.paragraph
                     [ Font.size 16 ]
 
-        ( type_, optsElem ) =
-            case webhook.type_ of
-                TaskActivity opts ->
-                    ( "taskActivity"
-                    , optPara
-                        [ boolOpt "created" opts.created
-                        , boolOpt "updated" opts.updated
-                        , boolOpt "deleted" opts.deleted
-                        , boolOpt "scored" opts.scored
-                        , boolOpt "checklistScored" opts.checklistScored
-                        ]
-                    )
+        listToSentence : Nonempty String -> List (Element Msg)
+        listToSentence opts =
+            let
+                italic =
+                    Element.el [ Font.italic ] << Element.text
+            in
+            case Nonempty.length opts of
+                1 ->
+                    [ italic (Nonempty.head opts) ]
 
-                GroupChatReceived opts ->
+                2 ->
+                    [ italic (Nonempty.get 0 opts), Element.text " or ", italic (Nonempty.get 1 opts) ]
+
+                _ ->
                     let
-                        (GroupUUID groupId) =
-                            opts.groupId
-                    in
-                    ( "groupChatReceived"
-                    , optPara
-                        [ Element.text <| "groupId: " ++ Uuid.toString groupId ]
-                    )
+                        reversed =
+                            Nonempty.reverse opts |> Nonempty.map (\t -> [ italic t ])
 
-                UserActivity opts ->
-                    ( "userActivity"
-                    , optPara
-                        [ boolOpt "mountRaised" opts.mountRaised
-                        , boolOpt "petHatched" opts.petHatched
-                        , boolOpt "leveledUp" opts.leveledUp
-                        ]
-                    )
+                        last =
+                            Nonempty.head reversed
+
+                        withEndingOr =
+                            Nonempty.replaceHead (Element.text "or " :: last) reversed
+                    in
+                    Nonempty.toList withEndingOr
+                        |> List.reverse
+                        |> List.intersperse [ Element.text ", " ]
+                        |> List.concat
+
+        optsToSentence : List ( Bool, String ) -> Maybe (List (Element Msg))
+        optsToSentence =
+            List.filter Tuple.first
+                >> List.map Tuple.second
+                >> Nonempty.fromList
+                >> Maybe.andThen (listToSentence >> Just)
+
+        highlightStyle =
+            [ BG.color theme.page.background
+            , Element.paddingXY 5 10
+            ]
+
+        highlightBox =
+            Element.el highlightStyle
+
+        webhookUrlLink =
+            linkButton [] Nothing (Url.toString webhook.url)
+
+        optUI optPairs optView =
+            let
+                maybeOptPhrase =
+                    optsToSentence optPairs
+            in
+            case maybeOptPhrase of
+                Nothing ->
+                    [ Element.text "This webhook will never fire."
+                    , highlightBox webhookUrlLink
+                    ]
+
+                Just phrase ->
+                    optView phrase
     in
     Element.column
         ([ Border.rounded 3
@@ -1039,6 +1069,8 @@ webhookView webhook =
                     [ Border.dashed
                     , Border.color theme.misc.widget
                     , Border.width 1
+                    , Font.color theme.text.faded
+                    , Font.italic
                     ]
 
                 else
@@ -1060,15 +1092,7 @@ webhookView webhook =
                 [ Element.width Element.fill
                 , Element.spacing 30
                 ]
-                [ Element.paragraph
-                    (if not webhook.enabled then
-                        [ Font.color theme.text.faded
-                        , Font.italic
-                        ]
-
-                     else
-                        []
-                    )
+                [ Element.paragraph []
                     [ h2 labelTxt ]
                 , Element.row
                     [ Element.alignRight
@@ -1079,29 +1103,68 @@ webhookView webhook =
                     , linkButton [] (Just (ConfirmDelete webhook)) "Delete"
                     ]
                 ]
-            , linkButton [] Nothing (Url.toString webhook.url)
             ]
         , Element.column
-            [ Font.family [ Font.typeface "Courier New" ]
+            [ Font.family [ Font.typeface "Calibri", Font.sansSerif ]
+            , Font.hairline
             , Font.size 18
-            , Element.spacing 4
+            , Element.spacing 6
             ]
-            [ Element.el
-                []
-                (Element.text type_)
-            , Element.wrappedRow
-                [ Element.paddingEach
-                    { left = 30
-                    , right = 0
-                    , top = 0
-                    , bottom = 0
-                    }
-                ]
-                [ Element.text "[ "
-                , optsElem
-                , Element.text " ]"
-                ]
-            ]
+          <|
+            case webhook.type_ of
+                TaskActivity opts ->
+                    optUI
+                        [ Tuple.pair opts.created "created"
+                        , Tuple.pair opts.updated "updated"
+                        , Tuple.pair opts.deleted "deleted"
+                        , Tuple.pair opts.scored "scored"
+                        , Tuple.pair opts.checklistScored "a task's checklist item is scored"
+                        ]
+                    <|
+                        \phrase ->
+                            [ Element.text "This webhook will send an event to"
+                            , highlightBox webhookUrlLink
+                            , Element.wrappedRow []
+                                [ Element.text "when "
+                                , Element.paragraph highlightStyle <|
+                                    [ Element.text "a task is " ]
+                                        ++ phrase
+                                        ++ [ Element.text "." ]
+                                ]
+                            ]
+
+                GroupChatReceived opts ->
+                    let
+                        (GroupUUID groupId) =
+                            opts.groupId
+
+                        uuid =
+                            Uuid.toString groupId
+                    in
+                    [ Element.text "This webhook will send an event to"
+                    , highlightBox webhookUrlLink
+                    , Element.text "when a message is posted in the group with the ID"
+                    , highlightBox (Element.text uuid)
+                    ]
+
+                UserActivity opts ->
+                    optUI
+                        [ Tuple.pair opts.mountRaised "raises a mount"
+                        , Tuple.pair opts.petHatched "hatches a pet"
+                        , Tuple.pair opts.leveledUp "levels up"
+                        ]
+                    <|
+                        \phrase ->
+                            [ Element.text "This webhook will send an event to"
+                            , highlightBox webhookUrlLink
+                            , Element.wrappedRow []
+                                [ Element.text "when "
+                                , Element.paragraph highlightStyle <|
+                                    [ Element.text "the user " ]
+                                        ++ phrase
+                                        ++ [ Element.text "." ]
+                                ]
+                            ]
         , Element.el
             [ Font.size 14
             , Font.color theme.text.faded
