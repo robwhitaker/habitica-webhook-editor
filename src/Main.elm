@@ -826,7 +826,7 @@ theme =
         , faded = Element.rgb255 125 125 125
         , link = Element.rgb255 180 0 0
         , linkGlow = Element.rgb 1 1 1
-        , enabled = Element.rgb 0.2 0.8 0.2
+        , enabled = Element.rgb 1 1 1
         }
     , button =
         { yes = Element.rgb255 90 0 0
@@ -943,8 +943,14 @@ workingOn job =
 confirmation : Confirmation -> List (Element Msg)
 confirmation confirm =
     [ Element.text confirm.text
-    , yesButton [] (Just confirm.action) "Yes"
-    , noButton [] (Just ConfirmCancel) "Cancel"
+    , Element.row
+        [ Element.alignRight
+        , Element.width Element.fill
+        , Element.spacing 10
+        ]
+        [ yesButton [ Element.width Element.fill ] (Just confirm.action) "Yes"
+        , noButton [ Element.width Element.fill ] (Just ConfirmCancel) "Cancel"
+        ]
     ]
 
 
