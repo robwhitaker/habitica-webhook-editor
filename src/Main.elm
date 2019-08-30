@@ -1,6 +1,7 @@
 module Main exposing (main)
 
 import Browser
+import Dict exposing (Dict)
 import Element exposing (Element)
 import Element.Background as BG
 import Element.Border as Border
@@ -44,12 +45,25 @@ type alias Model =
     }
 
 
+type alias UUIDStr =
+    String
+
+
+type alias GroupName =
+    String
+
+
+type alias GroupNameDict =
+    Dict UUIDStr (Result String GroupName)
+
+
 type alias LoggedInModel =
     { webhooks : WebhookStatus
     , editor : Maybe Editor
     , confirm : Maybe Confirmation
     , requestError : Maybe WebhookListError
     , partyId : Maybe GroupUUID
+    , groupNames : GroupNameDict
     }
 
 
@@ -90,7 +104,7 @@ type Session
 type WebhookStatus
     = Saving SaveAction
     | Reloading
-    | FailedLoading Http.Error
+    | FailedLoading String
     | Ready (List Webhook)
 
 
@@ -234,9 +248,10 @@ type Msg
     | Login
     | ReceiveLoginResult (Result String Session)
     | ReloadWebhooks
-    | ReloadedWebhooks (Result Http.Error (List Webhook))
+    | ReloadedWebhooks (Result String (List Webhook))
     | SavedWebhook (Result (Http.Response String) ())
     | DeletedWebhook (Result Http.Error ())
+    | GotGroupName GroupUUID (Result String GroupName)
     | Edit (Maybe Webhook)
     | Delete WebhookUUID
     | ConfirmDelete Webhook
@@ -287,7 +302,17 @@ update msg model =
 
                 Ok session ->
                     ( { model | session = session }
-                    , Cmd.none
+                    , case session of
+                        LoggedIn loggedInModel ->
+                            case loggedInModel.webhooks of
+                                Ready webhooks ->
+                                    fetchGroupNames model.userId model.userApiKey webhooks loggedInModel.groupNames
+
+                                _ ->
+                                    Cmd.none
+
+                        _ ->
+                            Cmd.none
                     )
 
         ReloadWebhooks ->
@@ -302,32 +327,30 @@ update msg model =
                 model
 
         ReloadedWebhooks result ->
-            let
-                newModel =
-                    mapLoggedInModel
-                        (\loggedInModel ->
-                            case result of
-                                Err err ->
-                                    { loggedInModel | webhooks = FailedLoading err }
+            withLoggedInModel
+                (\loggedInModel ->
+                    case result of
+                        Err err ->
+                            ( { loggedInModel | webhooks = FailedLoading err }, Cmd.none )
 
-                                Ok webhooks ->
-                                    { loggedInModel
-                                        | webhooks = Ready webhooks
-                                        , requestError =
-                                            case loggedInModel.requestError of
-                                                Nothing ->
-                                                    Nothing
+                        Ok webhooks ->
+                            ( { loggedInModel
+                                | webhooks = Ready webhooks
+                                , requestError =
+                                    case loggedInModel.requestError of
+                                        Nothing ->
+                                            Nothing
 
-                                                Just (ErrorSeen _) ->
-                                                    Nothing
+                                        Just (ErrorSeen _) ->
+                                            Nothing
 
-                                                Just (ErrorUnseen txt) ->
-                                                    Just (ErrorSeen txt)
-                                    }
-                        )
-                        model
-            in
-            ( newModel, Cmd.none )
+                                        Just (ErrorUnseen txt) ->
+                                            Just (ErrorSeen txt)
+                              }
+                            , fetchGroupNames model.userId model.userApiKey webhooks loggedInModel.groupNames
+                            )
+                )
+                model
 
         SavedWebhook result ->
             withLoggedInModel
@@ -386,6 +409,19 @@ update msg model =
                             )
                 )
                 model
+
+        GotGroupName (GroupUUID uuid) result ->
+            let
+                newModel =
+                    mapLoggedInModel
+                        (\loggedInModel ->
+                            { loggedInModel
+                                | groupNames = Dict.insert (Uuid.toString uuid) result loggedInModel.groupNames
+                            }
+                        )
+                        model
+            in
+            ( newModel, Cmd.none )
 
         Edit maybeWebhook ->
             let
@@ -526,27 +562,24 @@ update msg model =
 
                         Ok webhook ->
                             let
-                                newModel =
-                                    { webhooks =
-                                        case webhook.id of
-                                            Nothing ->
-                                                Saving SaveCreate
-
-                                            _ ->
-                                                Saving SaveUpdate
-                                    , editor = Nothing
-                                    , confirm = Nothing
-                                    , requestError = Nothing
-                                    , partyId = Nothing
-                                    }
-
                                 saveCmd =
                                     saveWebhookWrapper model.userId model.userApiKey webhook
                                         |> Task.attempt SavedWebhook
                             in
                             withLoggedInModel
                                 (\m ->
-                                    ( { newModel | partyId = m.partyId }
+                                    ( { m
+                                        | webhooks =
+                                            case webhook.id of
+                                                Nothing ->
+                                                    Saving SaveCreate
+
+                                                _ ->
+                                                    Saving SaveUpdate
+                                        , editor = Nothing
+                                        , confirm = Nothing
+                                        , requestError = Nothing
+                                      }
                                     , saveCmd
                                     )
                                 )
@@ -572,6 +605,34 @@ update msg model =
                 model
             , Cmd.none
             )
+
+
+fetchGroupNames : UserUUID -> UserApiKey -> List Webhook -> GroupNameDict -> Cmd Msg
+fetchGroupNames userId apiKey webhooks namesById =
+    Cmd.batch <|
+        Tuple.first <|
+            List.foldl
+                (\((GroupUUID uuid) as groupId) (( cmds, seenDict ) as acc) ->
+                    if Dict.member (Uuid.toString uuid) seenDict then
+                        acc
+
+                    else
+                        ( getGroupName userId apiKey groupId :: cmds
+                        , Dict.insert (Uuid.toString uuid) (Ok "") seenDict
+                        )
+                )
+                ( [], namesById )
+            <|
+                List.filterMap
+                    (\webhook ->
+                        case webhook.type_ of
+                            GroupChatReceived opts ->
+                                Just opts.groupId
+
+                            _ ->
+                                Nothing
+                    )
+                    webhooks
 
 
 editorToWebhook : WebhookEditForm -> Result (List ValidationError) Webhook
@@ -824,6 +885,7 @@ mapUserActivityOptions f =
 theme =
     { text =
         { normal = Element.rgb 1 1 1
+        , warning = Element.rgb255 255 255 0
         , error = Element.rgb255 180 0 0
         , faded = Element.rgb255 125 125 125
         , link = Element.rgb255 180 0 0
@@ -956,8 +1018,8 @@ confirmation confirm =
     ]
 
 
-webhookList : List Webhook -> List (Element Msg)
-webhookList webhooks =
+webhookList : GroupNameDict -> List Webhook -> List (Element Msg)
+webhookList groupNames webhooks =
     [ Element.row
         [ Element.centerX
         , Element.spacing 10
@@ -966,11 +1028,11 @@ webhookList webhooks =
         , noButton [] (Just ReloadWebhooks) "Refresh"
         ]
     ]
-        ++ List.map webhookView webhooks
+        ++ List.map (webhookView groupNames) webhooks
 
 
-webhookView : Webhook -> Element Msg
-webhookView webhook =
+webhookView : GroupNameDict -> Webhook -> Element Msg
+webhookView groupNames webhook =
     let
         labelTxt =
             if String.trim webhook.label == "" then
@@ -1047,6 +1109,9 @@ webhookView webhook =
             , Element.paddingXY 5 10
             ]
 
+        highlightPara =
+            Element.paragraph highlightStyle
+
         highlightBox =
             Element.el highlightStyle
 
@@ -1117,6 +1182,7 @@ webhookView webhook =
             , Font.hairline
             , Font.size 18
             , Element.spacing 6
+            , Element.width Element.fill
             ]
           <|
             case webhook.type_ of
@@ -1148,11 +1214,62 @@ webhookView webhook =
 
                         uuid =
                             Uuid.toString groupId
+
+                        groupText =
+                            Dict.get (Uuid.toString groupId) groupNames
+                                |> Maybe.andThen
+                                    (\groupNameResult ->
+                                        case groupNameResult of
+                                            Ok name ->
+                                                Just <|
+                                                    Element.wrappedRow []
+                                                        [ Element.text "when "
+                                                        , Element.paragraph highlightStyle
+                                                            [ Element.text "a message is sent to "
+                                                            , Element.el [ Font.italic ] (Element.text name)
+                                                            , Element.text "."
+                                                            ]
+                                                        ]
+
+                                            Err err ->
+                                                Just <|
+                                                    Element.column [ Element.width Element.fill ]
+                                                        [ Element.wrappedRow []
+                                                            [ Element.text "when "
+                                                            , Element.paragraph highlightStyle
+                                                                [ Element.text "a message is sent to the group with ID "
+                                                                , Element.el [ Font.italic ] (Element.text uuid)
+                                                                , Element.text "."
+                                                                ]
+                                                            ]
+                                                        , Element.el
+                                                            [ Font.color theme.text.warning
+                                                            , Font.size 20
+                                                            , Element.paddingXY 0 15
+                                                            ]
+                                                            (Element.text "WARNING! Your hook may not fire! An error occured while fetching the group.")
+                                                        , Element.el
+                                                            (highlightStyle
+                                                                ++ [ Element.clipX
+                                                                   , Element.scrollbarX
+                                                                   , Element.width Element.fill
+                                                                   , Font.family [ Font.monospace ]
+                                                                   ]
+                                                            )
+                                                            (Element.text err)
+                                                        ]
+                                    )
+                                |> Maybe.withDefault
+                                    (Element.paragraph highlightStyle
+                                        [ Element.text "a message is sent to "
+                                        , Element.el [ Font.italic ] (Element.text "(...loading group name...)")
+                                        , Element.text "."
+                                        ]
+                                    )
                     in
                     [ Element.text "This webhook will send an event to"
                     , highlightBox webhookUrlLink
-                    , Element.text "when a message is posted in the group with the ID"
-                    , highlightBox (Element.text uuid)
+                    , groupText
                     ]
 
                 UserActivity opts ->
@@ -1391,7 +1508,7 @@ webhookDashboard model =
                                             ]
                                             (Element.text <| showError err)
                         in
-                        errorBox :: webhookList webhooks
+                        errorBox :: webhookList model.groupNames webhooks
 
                     ( Nothing, Just editor ) ->
                         webhookEditor model.partyId editor
@@ -1525,40 +1642,48 @@ inputPlaceholder txt =
             (Element.text txt)
 
 
+customResponseHandler : Decoder a -> (Http.Response String -> Result String a)
+customResponseHandler decoder =
+    \response ->
+        case response of
+            Http.BadStatus_ metadata body ->
+                case Decode.decodeString decoder body of
+                    Ok value ->
+                        Ok value
+
+                    Err err ->
+                        Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
+
+            Http.GoodStatus_ metadata body ->
+                case Decode.decodeString decoder body of
+                    Ok value ->
+                        Ok value
+
+                    Err err ->
+                        Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
+
+            _ ->
+                Err "Something went wrong. Please try again later."
+
+
 customExpectJson : (Result String a -> msg) -> Decoder a -> Http.Expect msg
-customExpectJson toMsg decoder =
-    Http.expectStringResponse toMsg <|
-        \response ->
-            case response of
-                Http.BadStatus_ metadata body ->
-                    case Decode.decodeString decoder body of
-                        Ok value ->
-                            Ok value
+customExpectJson toMsg =
+    Http.expectStringResponse toMsg << customResponseHandler
 
-                        Err err ->
-                            Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
 
-                Http.GoodStatus_ metadata body ->
-                    case Decode.decodeString decoder body of
-                        Ok value ->
-                            Ok value
-
-                        Err err ->
-                            Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
-
-                _ ->
-                    Err "Something went wrong. Please try again later."
+mkHeaders : UserUUID -> UserApiKey -> List Http.Header
+mkHeaders (UserUUID uuid) (UserApiKey apiKey) =
+    [ Http.header "x-api-user" uuid
+    , Http.header "x-api-key" apiKey
+    , Http.header "x-client" (maintainerId ++ "-" ++ appName)
+    ]
 
 
 requestUser : Http.Expect Msg -> UserUUID -> UserApiKey -> Cmd Msg
-requestUser expect (UserUUID uuid) (UserApiKey apiKey) =
+requestUser expect userId apiKey =
     Http.request
         { method = "GET"
-        , headers =
-            [ Http.header "x-api-user" uuid
-            , Http.header "x-api-key" apiKey
-            , Http.header "x-client" (maintainerId ++ "-" ++ appName)
-            ]
+        , headers = mkHeaders userId apiKey
         , url = "https://habitica.com/api/v3/user"
         , body = Http.emptyBody
         , expect = expect
@@ -1574,20 +1699,30 @@ requestUserLogin =
 
 reloadWebhooks : UserUUID -> UserApiKey -> Cmd Msg
 reloadWebhooks =
-    requestUser (Http.expectJson ReloadedWebhooks (Decode.map Tuple.first userResponseDecoder))
+    requestUser (customExpectJson ReloadedWebhooks (Decode.map Tuple.first userResponseDecoder))
 
 
 deleteWebhook : UserUUID -> UserApiKey -> WebhookUUID -> Cmd Msg
-deleteWebhook (UserUUID userUuid) (UserApiKey apiKey) (WebhookUUID uuid) =
+deleteWebhook userId apiKey (WebhookUUID uuid) =
     Http.request
         { method = "DELETE"
-        , headers =
-            [ Http.header "x-api-user" userUuid
-            , Http.header "x-api-key" apiKey
-            ]
+        , headers = mkHeaders userId apiKey
         , url = "https://habitica.com/api/v3/user/webhook/" ++ Uuid.toString uuid
         , body = Http.emptyBody
         , expect = Http.expectWhatever DeletedWebhook
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+getGroupName : UserUUID -> UserApiKey -> GroupUUID -> Cmd Msg
+getGroupName userId apiKey ((GroupUUID uuid) as groupId) =
+    Http.request
+        { method = "GET"
+        , headers = mkHeaders userId apiKey
+        , url = "https://habitica.com/api/v3/groups/" ++ Uuid.toString uuid
+        , body = Http.emptyBody
+        , expect = customExpectJson (GotGroupName groupId) (Decode.at [ "data", "name" ] Decode.string)
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -1632,7 +1767,7 @@ saveWebhookWrapper uuid apiKey webhook =
 
 
 saveWebhook : UserUUID -> UserApiKey -> Webhook -> Task (Http.Response String) ()
-saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
+saveWebhook userId apiKey webhook =
     let
         ( method, endpoint ) =
             case webhook.id of
@@ -1651,10 +1786,7 @@ saveWebhook (UserUUID uuid) (UserApiKey apiKey) webhook =
     in
     Http.task
         { method = method
-        , headers =
-            [ Http.header "x-api-user" uuid
-            , Http.header "x-api-key" apiKey
-            ]
+        , headers = mkHeaders userId apiKey
         , url = endpoint
         , body = Http.jsonBody encodedWebhook
         , resolver =
@@ -1689,7 +1821,7 @@ loginDecoder =
             if success then
                 Decode.map
                     (\( webhook, maybePartyId ) ->
-                        LoggedIn <| LoggedInModel (Ready webhook) Nothing Nothing Nothing maybePartyId
+                        LoggedIn <| LoggedInModel (Ready webhook) Nothing Nothing Nothing maybePartyId Dict.empty
                     )
                     userResponseDecoder
 
