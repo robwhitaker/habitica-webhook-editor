@@ -8,6 +8,9 @@ import Element.Border as Border
 import Element.Font as Font
 import Element.Input as Input
 import Element.Region as Region
+import FontAwesome.Icon as FA
+import FontAwesome.Solid as FA
+import FontAwesome.Styles as FA
 import Html exposing (Html)
 import Html.Attributes as A
 import Html.Events as Event
@@ -911,6 +914,7 @@ theme =
         { background = Element.rgb255 10 10 10 }
     , misc =
         { widget = Element.rgb255 20 20 20
+        , widgetError = Element.rgb255 25 10 10
         , widgetShadow = Element.rgba 0 0 0 0.4
         }
     }
@@ -937,6 +941,7 @@ contentColumn =
         [ Element.centerX
         , Element.centerY
         , Element.spacing 10
+        , Element.paddingXY 0 15
         ]
 
 
@@ -1049,25 +1054,6 @@ webhookView groupNames webhook =
                 Just (WebhookUUID uuid) ->
                     Uuid.toString uuid
 
-        boolOpt txt enabled =
-            Element.el
-                (if enabled then
-                    [ Font.color theme.text.enabled
-                    , Font.bold
-                    ]
-
-                 else
-                    [ Font.color theme.text.faded
-                    , Font.italic
-                    ]
-                )
-                (Element.text txt)
-
-        optPara =
-            List.intersperse (Element.text " ")
-                >> Element.paragraph
-                    [ Font.size 16 ]
-
         listToSentence : Nonempty String -> List (Element Msg)
         listToSentence opts =
             let
@@ -1109,9 +1095,6 @@ webhookView groupNames webhook =
             , Element.paddingXY 5 10
             ]
 
-        highlightPara =
-            Element.paragraph highlightStyle
-
         highlightBox =
             Element.el highlightStyle
 
@@ -1123,68 +1106,17 @@ webhookView groupNames webhook =
                 maybeOptPhrase =
                     optsToSentence optPairs
             in
-            case maybeOptPhrase of
-                Nothing ->
-                    [ Element.text "This webhook will never fire."
-                    , highlightBox webhookUrlLink
-                    ]
+            (\body_ -> Tuple.pair body_ (Ok ())) <|
+                case maybeOptPhrase of
+                    Nothing ->
+                        [ Element.text "This webhook will never fire."
+                        , highlightBox webhookUrlLink
+                        ]
 
-                Just phrase ->
-                    optView phrase
-    in
-    Element.column
-        ([ Border.rounded 3
-         , Element.spacing 10
-         , Element.padding 10
-         , Element.width (Element.fill |> Element.maximum 800)
-         ]
-            ++ (if not webhook.enabled then
-                    [ Border.dashed
-                    , Border.color theme.misc.widget
-                    , Border.width 1
-                    , Font.color theme.text.faded
-                    , Font.italic
-                    ]
+                    Just phrase ->
+                        optView phrase
 
-                else
-                    [ BG.color theme.misc.widget
-                    , Border.shadow
-                        { offset = ( 3, 3 )
-                        , size = 4
-                        , blur = 5
-                        , color = theme.misc.widgetShadow
-                        }
-                    ]
-               )
-        )
-        [ Element.column
-            [ Element.width Element.fill
-            , Element.spacing 4
-            ]
-            [ Element.row
-                [ Element.width Element.fill
-                , Element.spacing 30
-                ]
-                [ Element.paragraph []
-                    [ h2 labelTxt ]
-                , Element.row
-                    [ Element.alignRight
-                    , Element.alignTop
-                    , Element.spacing 10
-                    ]
-                    [ linkButton [] (Just (Edit <| Just webhook)) "Edit"
-                    , linkButton [] (Just (ConfirmDelete webhook)) "Delete"
-                    ]
-                ]
-            ]
-        , Element.column
-            [ Font.family [ Font.typeface "Calibri", Font.sansSerif ]
-            , Font.hairline
-            , Font.size 18
-            , Element.spacing 6
-            , Element.width Element.fill
-            ]
-          <|
+        ( body, webhookStatus ) =
             case webhook.type_ of
                 TaskActivity opts ->
                     optUI
@@ -1215,26 +1147,29 @@ webhookView groupNames webhook =
                         uuid =
                             Uuid.toString groupId
 
-                        groupText =
+                        ( groupText, maybeErr ) =
                             Dict.get (Uuid.toString groupId) groupNames
                                 |> Maybe.andThen
                                     (\groupNameResult ->
                                         case groupNameResult of
                                             Ok name ->
                                                 Just <|
-                                                    Element.wrappedRow []
-                                                        [ Element.text "when "
-                                                        , Element.paragraph highlightStyle
-                                                            [ Element.text "a message is sent to "
-                                                            , Element.el [ Font.italic ] (Element.text name)
-                                                            , Element.text "."
+                                                    Tuple.pair
+                                                        (Element.wrappedRow []
+                                                            [ Element.text "when "
+                                                            , Element.paragraph highlightStyle
+                                                                [ Element.text "a message is sent to "
+                                                                , Element.el [ Font.italic ] (Element.text name)
+                                                                , Element.text "."
+                                                                ]
                                                             ]
-                                                        ]
+                                                        )
+                                                        (Ok ())
 
                                             Err err ->
                                                 Just <|
-                                                    Element.column [ Element.width Element.fill ]
-                                                        [ Element.wrappedRow []
+                                                    Tuple.pair
+                                                        (Element.wrappedRow []
                                                             [ Element.text "when "
                                                             , Element.paragraph highlightStyle
                                                                 [ Element.text "a message is sent to the group with ID "
@@ -1242,35 +1177,26 @@ webhookView groupNames webhook =
                                                                 , Element.text "."
                                                                 ]
                                                             ]
-                                                        , Element.el
-                                                            [ Font.color theme.text.warning
-                                                            , Font.size 20
-                                                            , Element.paddingXY 0 15
-                                                            ]
-                                                            (Element.text "WARNING! Your hook may not fire! An error occured while fetching the group.")
-                                                        , Element.el
-                                                            (highlightStyle
-                                                                ++ [ Element.clipX
-                                                                   , Element.scrollbarX
-                                                                   , Element.width Element.fill
-                                                                   , Font.family [ Font.monospace ]
-                                                                   ]
-                                                            )
-                                                            (Element.text err)
-                                                        ]
+                                                        )
+                                                        (Err err)
                                     )
                                 |> Maybe.withDefault
-                                    (Element.paragraph highlightStyle
-                                        [ Element.text "a message is sent to "
-                                        , Element.el [ Font.italic ] (Element.text "(...loading group name...)")
-                                        , Element.text "."
-                                        ]
+                                    (Tuple.pair
+                                        (Element.paragraph highlightStyle
+                                            [ Element.text "a message is sent to "
+                                            , Element.el [ Font.italic ] (Element.text "(...loading group name...)")
+                                            , Element.text "."
+                                            ]
+                                        )
+                                        (Ok ())
                                     )
                     in
-                    [ Element.text "This webhook will send an event to"
-                    , highlightBox webhookUrlLink
-                    , groupText
-                    ]
+                    ( [ Element.text "This webhook will send an event to"
+                      , highlightBox webhookUrlLink
+                      , groupText
+                      ]
+                    , maybeErr
+                    )
 
                 UserActivity opts ->
                     optUI
@@ -1290,6 +1216,96 @@ webhookView groupNames webhook =
                                         ++ [ Element.text "." ]
                                 ]
                             ]
+    in
+    Element.column
+        ([ Border.rounded 3
+         , Element.spacing 10
+         , Element.padding 10
+         , Element.width (Element.fill |> Element.maximum 800)
+         ]
+            ++ (if not webhook.enabled then
+                    [ Border.dashed
+                    , Border.color theme.misc.widget
+                    , Border.width 1
+                    , Font.color theme.text.faded
+                    , Font.italic
+                    ]
+
+                else
+                    [ BG.color theme.misc.widget
+                    , Border.shadow
+                        { offset = ( 3, 3 )
+                        , size = 4
+                        , blur = 5
+                        , color = theme.misc.widgetShadow
+                        }
+                    ]
+               )
+            ++ (case webhookStatus of
+                    Err _ ->
+                        [ Border.dashed
+                        , Border.color theme.text.error
+                        , Border.width 1
+                        , BG.color theme.misc.widgetError
+                        ]
+
+                    Ok _ ->
+                        []
+               )
+        )
+        [ Element.column
+            [ Element.width Element.fill
+            , Element.spacing 4
+            ]
+            [ Element.row
+                [ Element.width Element.fill
+                , Element.spacing 30
+                ]
+                [ Element.paragraph []
+                    [ h2_ <|
+                        Element.paragraph []
+                            [ case webhookStatus of
+                                Err err ->
+                                    errorIcon
+
+                                Ok _ ->
+                                    Element.none
+                            , Element.text labelTxt
+                            ]
+                    ]
+                , Element.row
+                    [ Element.alignRight
+                    , Element.alignTop
+                    , Element.spacing 10
+                    ]
+                    [ linkButton [] (Just (Edit <| Just webhook)) "Edit"
+                    , linkButton [] (Just (ConfirmDelete webhook)) "Delete"
+                    ]
+                ]
+            ]
+        , Element.column
+            [ Font.family [ Font.typeface "Calibri", Font.sansSerif ]
+            , Font.hairline
+            , Font.size 18
+            , Element.spacing 6
+            , Element.width Element.fill
+            ]
+          <|
+            [ case webhookStatus of
+                Err err ->
+                    Element.paragraph
+                        ([ Element.width Element.fill
+                         , Font.family [ Font.typeface "Courier New", Font.monospace ]
+                         ]
+                            ++ highlightStyle
+                            ++ [ Element.padding 20 ]
+                        )
+                        [ Element.text err ]
+
+                Ok _ ->
+                    Element.none
+            ]
+                ++ body
         , Element.el
             [ Font.size 14
             , Font.color theme.text.faded
@@ -1298,6 +1314,20 @@ webhookView groupNames webhook =
             ]
             (Element.text idTxt)
         ]
+
+
+iconElement : FA.Icon -> Element Msg
+iconElement =
+    Element.html << FA.viewIcon
+
+
+errorIcon : Element Msg
+errorIcon =
+    Element.row
+        [ Font.color theme.text.error
+        , Element.paddingEach { top = 0, bottom = 0, left = 0, right = 10 }
+        ]
+        [ iconElement FA.exclamationCircle ]
 
 
 editorFieldRow : String -> (String -> List (Element.Attribute Msg) -> Element Msg) -> Element Msg
@@ -1421,7 +1451,16 @@ webhookEditor partyId editor =
         ( fields, errors ) =
             editor
     in
-    [ Element.column [] <| List.map Element.text errors
+    [ Element.column [ Element.spacing 10 ] <|
+        List.map
+            (\err ->
+                Element.paragraph
+                    [ Font.color theme.text.error ]
+                    [ errorIcon
+                    , Element.text err
+                    ]
+            )
+            errors
     , Element.column
         [ Element.spacing 20 ]
         [ Element.column
@@ -1593,12 +1632,15 @@ linkButton extraAttrs action text =
         }
 
 
+h_ : Int -> List (Element.Attribute Msg) -> Element Msg -> Element Msg
+h_ n extraAttrs =
+    Element.el
+        (extraAttrs ++ [ Region.heading n ])
+
+
 h : Int -> List (Element.Attribute Msg) -> String -> Element Msg
-h n extraAttrs =
-    \text ->
-        Element.el
-            (extraAttrs ++ [ Region.heading n ])
-            (Element.text text)
+h n extraAttrs txt =
+    h_ n extraAttrs (Element.text txt)
 
 
 h1 : String -> Element Msg
@@ -1606,12 +1648,17 @@ h1 =
     h 1 [ Element.centerX, Font.size 32 ]
 
 
-h2 : String -> Element Msg
-h2 =
-    h 2
+h2_ : Element Msg -> Element Msg
+h2_ =
+    h_ 2
         [ Font.size 28
         , Font.family [ Font.typeface "Trebuchet MS" ]
         ]
+
+
+h2 : String -> Element Msg
+h2 =
+    h2_ << Element.text
 
 
 type alias TextInputFn msg opts =
@@ -1948,7 +1995,11 @@ main : Program () Model Msg
 main =
     Browser.document
         { init = \_ -> ( empty, Cmd.none )
-        , view = \model -> Browser.Document "Habitica Webhook Manager" [ view model ]
+        , view =
+            \model ->
+                Browser.Document
+                    "Habitica Webhook Manager"
+                    [ FA.css, view model ]
         , update = update
         , subscriptions = \_ -> Sub.none
         }
