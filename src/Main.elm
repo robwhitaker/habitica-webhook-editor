@@ -157,7 +157,7 @@ type alias TaskActivityOptions =
 
 
 type alias GroupChatReceivedOptions =
-    { groupId : GroupUUID }
+    { groupId : Result String GroupUUID }
 
 
 type alias UserActivityOptions =
@@ -169,7 +169,7 @@ type alias UserActivityOptions =
 
 type alias Webhook =
     { id : Maybe WebhookUUID
-    , url : Url
+    , url : Result String Url
     , label : String
     , enabled : Bool
     , type_ : Type
@@ -254,7 +254,7 @@ type Msg
     | ReloadedWebhooks (Result String (List Webhook))
     | SavedWebhook (Result (Http.Response String) ())
     | DeletedWebhook (Result Http.Error ())
-    | GotGroupName GroupUUID (Result String GroupName)
+    | GotGroupName (Result String GroupUUID) (Result String GroupName)
     | Edit (Maybe Webhook)
     | Delete WebhookUUID
     | ConfirmDelete Webhook
@@ -413,13 +413,16 @@ update msg model =
                 )
                 model
 
-        GotGroupName (GroupUUID uuid) result ->
+        GotGroupName groupId result ->
             let
+                groupUuidStr =
+                    unwrapGroupId groupId
+
                 newModel =
                     mapLoggedInModel
                         (\loggedInModel ->
                             { loggedInModel
-                                | groupNames = Dict.insert (Uuid.toString uuid) result loggedInModel.groupNames
+                                | groupNames = Dict.insert groupUuidStr result loggedInModel.groupNames
                             }
                         )
                         model
@@ -447,7 +450,7 @@ update msg model =
                                         | editor =
                                             Just <|
                                                 ( { id = webhookUuid
-                                                  , url = Url.toString webhook.url
+                                                  , url = unwrapUrl webhook.url
                                                   , enabled = webhook.enabled
                                                   , label = webhook.label
                                                   , type_ = hookOpts.editType
@@ -612,30 +615,42 @@ update msg model =
 
 fetchGroupNames : UserUUID -> UserApiKey -> List Webhook -> GroupNameDict -> Cmd Msg
 fetchGroupNames userId apiKey webhooks namesById =
-    Cmd.batch <|
-        Tuple.first <|
-            List.foldl
-                (\((GroupUUID uuid) as groupId) (( cmds, seenDict ) as acc) ->
-                    if Dict.member (Uuid.toString uuid) seenDict then
-                        acc
+    webhooks
+        |> List.filterMap
+            (\webhook ->
+                case webhook.type_ of
+                    GroupChatReceived opts ->
+                        Just opts.groupId
 
-                    else
-                        ( getGroupName userId apiKey groupId :: cmds
-                        , Dict.insert (Uuid.toString uuid) (Ok "") seenDict
-                        )
-                )
-                ( [], namesById )
-            <|
-                List.filterMap
-                    (\webhook ->
-                        case webhook.type_ of
-                            GroupChatReceived opts ->
-                                Just opts.groupId
+                    _ ->
+                        Nothing
+            )
+        |> List.foldl
+            (\groupId (( cmds, seenDict ) as acc) ->
+                let
+                    groupIdStr =
+                        unwrapGroupId groupId
+                in
+                if Dict.member groupIdStr seenDict then
+                    acc
 
-                            _ ->
-                                Nothing
+                else
+                    ( case groupId of
+                        Ok validGroupUuid ->
+                            getGroupName userId apiKey validGroupUuid :: cmds
+
+                        Err _ ->
+                            (Task.succeed
+                                (GotGroupName groupId (Err "Invalid group UUID. Unable to fetch group."))
+                                |> Task.perform identity
+                            )
+                                :: cmds
+                    , Dict.insert groupIdStr (Ok "") seenDict
                     )
-                    webhooks
+            )
+            ( [], namesById )
+        |> Tuple.first
+        |> Cmd.batch
 
 
 editorToWebhook : WebhookEditForm -> Result (List ValidationError) Webhook
@@ -644,7 +659,7 @@ editorToWebhook form =
         validatedUrl =
             form.url
                 |> Url.fromString
-                |> Maybe.map Ok
+                |> Maybe.map (Ok << Ok)
                 |> Maybe.withDefault (Err "Invalid URL.")
 
         validatedHookId =
@@ -684,7 +699,7 @@ editorToWebhook form =
                 validatedGroupId =
                     opts.groupId
                         |> Uuid.fromString
-                        |> Maybe.map (Ok << GroupUUID)
+                        |> Maybe.map (Ok << Ok << GroupUUID)
                         |> Maybe.withDefault (Err "Malformed UUID provided for field 'Group ID'.")
             in
             Ok
@@ -769,15 +784,15 @@ typeToEditable type_ =
 
         GroupChatReceived opts ->
             let
-                (GroupUUID idUnwrapped) =
-                    opts.groupId
+                idUnwrapped =
+                    unwrapGroupId opts.groupId
             in
             { editType = EditGroupChatReceived
             , opts =
                 { taskActivityOptions = emptyEditableTaskActivity
                 , groupChatReceivedOptions =
                     EditableGroupChatReceivedOptions
-                        { groupId = Uuid.toString idUnwrapped }
+                        { groupId = idUnwrapped }
                 , userActivityOptions = emptyEditableUserActivity
                 }
             }
@@ -1099,7 +1114,7 @@ webhookView groupNames webhook =
             Element.el highlightStyle
 
         webhookUrlLink =
-            linkButton [] Nothing (Url.toString webhook.url)
+            linkButton [] Nothing (unwrapUrl webhook.url)
 
         optUI optPairs optView =
             let
@@ -1116,7 +1131,7 @@ webhookView groupNames webhook =
                     Just phrase ->
                         optView phrase
 
-        ( body, webhookStatus ) =
+        ( body, hookTypeStatus ) =
             case webhook.type_ of
                 TaskActivity opts ->
                     optUI
@@ -1141,14 +1156,11 @@ webhookView groupNames webhook =
 
                 GroupChatReceived opts ->
                     let
-                        (GroupUUID groupId) =
-                            opts.groupId
-
                         uuid =
-                            Uuid.toString groupId
+                            unwrapGroupId opts.groupId
 
                         ( groupText, maybeErr ) =
-                            Dict.get (Uuid.toString groupId) groupNames
+                            Dict.get uuid groupNames
                                 |> Maybe.andThen
                                     (\groupNameResult ->
                                         case groupNameResult of
@@ -1216,6 +1228,23 @@ webhookView groupNames webhook =
                                         ++ [ Element.text "." ]
                                 ]
                             ]
+
+        webhookErrors =
+            [ webhook.url
+                |> Result.map (always ())
+                |> Result.mapError (always "Invalid URL.")
+            , hookTypeStatus
+                |> Result.map (always ())
+            ]
+                |> List.filterMap
+                    (\possibleError ->
+                        case possibleError of
+                            Err msg ->
+                                Just msg
+
+                            Ok _ ->
+                                Nothing
+                    )
     in
     Element.column
         ([ Border.rounded 3
@@ -1241,16 +1270,15 @@ webhookView groupNames webhook =
                         }
                     ]
                )
-            ++ (case webhookStatus of
-                    Err _ ->
-                        [ Border.dashed
-                        , Border.color theme.text.error
-                        , Border.width 1
-                        , BG.color theme.misc.widgetError
-                        ]
+            ++ (if List.isEmpty webhookErrors then
+                    []
 
-                    Ok _ ->
-                        []
+                else
+                    [ Border.dashed
+                    , Border.color theme.text.error
+                    , Border.width 1
+                    , BG.color theme.misc.widgetError
+                    ]
                )
         )
         [ Element.column
@@ -1264,12 +1292,11 @@ webhookView groupNames webhook =
                 [ Element.paragraph []
                     [ h2_ <|
                         Element.paragraph []
-                            [ case webhookStatus of
-                                Err err ->
-                                    errorIcon
+                            [ if List.isEmpty webhookErrors then
+                                Element.none
 
-                                Ok _ ->
-                                    Element.none
+                              else
+                                errorIcon
                             , Element.text labelTxt
                             ]
                     ]
@@ -1291,19 +1318,34 @@ webhookView groupNames webhook =
             , Element.width Element.fill
             ]
           <|
-            [ case webhookStatus of
-                Err err ->
-                    Element.paragraph
-                        ([ Element.width Element.fill
-                         , Font.family [ Font.typeface "Courier New", Font.monospace ]
-                         ]
-                            ++ highlightStyle
-                            ++ [ Element.padding 20 ]
-                        )
-                        [ Element.text err ]
+            [ if List.isEmpty webhookErrors then
+                Element.none
 
-                Ok _ ->
-                    Element.none
+              else
+                Element.textColumn
+                    ([ Element.width Element.fill ]
+                        ++ highlightStyle
+                        ++ [ Element.padding 20 ]
+                    )
+                    ([ Element.paragraph
+                        [ Font.color theme.text.warning
+                        , Font.size 22
+                        , Element.paddingEach { top = 0, bottom = 15, right = 0, left = 0 }
+                        ]
+                        [ Element.text "There are errors with your webhook, which may cause it not to fire:" ]
+                     ]
+                        ++ List.map
+                            (\err ->
+                                Element.row
+                                    [ Font.family [ Font.typeface "Courier New", Font.monospace ]
+                                    , Element.paddingEach { top = 0, bottom = 0, right = 0, left = 30 }
+                                    ]
+                                    [ Element.el [ Font.heavy ] (Element.text "(!) ")
+                                    , Element.paragraph [] [ Element.text err ]
+                                    ]
+                            )
+                            webhookErrors
+                    )
             ]
                 ++ body
         , Element.el
@@ -1769,7 +1811,7 @@ getGroupName userId apiKey ((GroupUUID uuid) as groupId) =
         , headers = mkHeaders userId apiKey
         , url = "https://habitica.com/api/v3/groups/" ++ Uuid.toString uuid
         , body = Http.emptyBody
-        , expect = customExpectJson (GotGroupName groupId) (Decode.at [ "data", "name" ] Decode.string)
+        , expect = customExpectJson (GotGroupName (Ok groupId)) (Decode.at [ "data", "name" ] Decode.string)
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -1894,7 +1936,12 @@ webhookDecoder =
         groupChatReceivedOptionsDecoder : Decoder GroupChatReceivedOptions
         groupChatReceivedOptionsDecoder =
             Decode.map GroupChatReceivedOptions
-                (Decode.field "groupId" (Decode.map GroupUUID Uuid.decoder))
+                (Decode.field "groupId" <|
+                    Decode.oneOf
+                        [ Decode.map (Ok << GroupUUID) Uuid.decoder
+                        , Decode.map Err Decode.string
+                        ]
+                )
 
         userActivityOptionsDecoder : Decoder UserActivityOptions
         userActivityOptionsDecoder =
@@ -1930,7 +1977,15 @@ webhookDecoder =
     in
     Decode.map5 Webhook
         (Decode.field "id" (Decode.map (Just << WebhookUUID) Uuid.decoder))
-        (Decode.field "url" Decode.string |> Decode.andThen decodeUrl)
+        (Decode.field "url" Decode.string
+            |> Decode.andThen
+                (\urlStr ->
+                    Decode.oneOf
+                        [ Decode.map Ok (decodeUrl urlStr)
+                        , Decode.succeed (Err urlStr)
+                        ]
+                )
+        )
         (Decode.field "label" Decode.string)
         (Decode.field "enabled" Decode.bool)
         (Decode.field "type" Decode.string |> Decode.andThen decodeType)
@@ -1939,7 +1994,7 @@ webhookDecoder =
 webhookEncoder : Webhook -> Value
 webhookEncoder webhook =
     Encode.object <|
-        [ ( "url", Encode.string (Url.toString webhook.url) )
+        [ ( "url", Encode.string (unwrapUrl webhook.url) )
         , ( "label"
             -- This is a janky hack because Habitica treats
             -- empty string as "no label field provided" and therefore
@@ -1967,14 +2022,18 @@ webhookEncoder webhook =
                         ]
 
                     GroupChatReceived opts ->
-                        let
-                            (GroupUUID groupUuid) =
-                                opts.groupId
-                        in
                         [ ( "type", Encode.string "groupChatReceived" )
                         , ( "options"
                           , Encode.object
-                                [ ( "groupId", Uuid.encode groupUuid ) ]
+                                [ ( "groupId"
+                                  , case opts.groupId of
+                                        Ok (GroupUUID validUuid) ->
+                                            Uuid.encode validUuid
+
+                                        Err strUuid ->
+                                            Encode.string strUuid
+                                  )
+                                ]
                           )
                         ]
 
@@ -1989,6 +2048,32 @@ webhookEncoder webhook =
                           )
                         ]
                )
+
+
+
+-- HELPER FUNCTIONS
+
+
+unwrapResult : (a -> c) -> (b -> c) -> Result a b -> c
+unwrapResult f g res =
+    case res of
+        Err a ->
+            f a
+
+        Ok b ->
+            g b
+
+
+unwrapUrl : Result String Url -> String
+unwrapUrl =
+    unwrapResult identity Url.toString
+
+
+unwrapGroupId : Result String GroupUUID -> String
+unwrapGroupId =
+    unwrapResult
+        identity
+        (\(GroupUUID groupId) -> Uuid.toString groupId)
 
 
 main : Program () Model Msg
