@@ -254,7 +254,7 @@ type Msg
     | ReloadedWebhooks (Result String (List Webhook))
     | SavedWebhook (Result (Http.Response String) ())
     | DeletedWebhook (Result Http.Error ())
-    | GotGroupName (Result String GroupUUID) (Result String GroupName)
+    | GotGroupName (Result String GroupUUID) (Result String (Result String GroupName))
     | Edit (Maybe Webhook)
     | Delete WebhookUUID
     | ConfirmDelete Webhook
@@ -413,10 +413,13 @@ update msg model =
                 )
                 model
 
-        GotGroupName groupId result ->
+        GotGroupName groupId result_ ->
             let
                 groupUuidStr =
                     unwrapGroupId groupId
+
+                result =
+                    result_ |> Result.andThen identity
 
                 newModel =
                     mapLoggedInModel
@@ -1811,7 +1814,7 @@ getGroupName userId apiKey ((GroupUUID uuid) as groupId) =
         , headers = mkHeaders userId apiKey
         , url = "https://habitica.com/api/v3/groups/" ++ Uuid.toString uuid
         , body = Http.emptyBody
-        , expect = customExpectJson (GotGroupName (Ok groupId)) (Decode.at [ "data", "name" ] Decode.string)
+        , expect = customExpectJson (GotGroupName (Ok groupId)) groupNameDecoder
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -1902,23 +1905,41 @@ userResponseDecoder =
         )
 
 
+habiticaResponseDecoder : Decoder a -> Decoder (Result String a)
+habiticaResponseDecoder decoder =
+    let
+        handleResult success =
+            if success then
+                Decode.map Ok decoder
+
+            else
+                Decode.map Err (Decode.field "message" Decode.string)
+    in
+    Decode.field "success" Decode.bool
+        |> Decode.andThen handleResult
+
+
 loginDecoder : Decoder Session
 loginDecoder =
     let
-        handleLoginResult : Bool -> Decoder Session
-        handleLoginResult success =
-            if success then
-                Decode.map
-                    (\( webhook, maybePartyId ) ->
-                        LoggedIn <| LoggedInModel (Ready webhook) Nothing Nothing Nothing maybePartyId Dict.empty
-                    )
-                    userResponseDecoder
+        handleLoginResult : Result String ( List Webhook, Maybe GroupUUID ) -> Decoder Session
+        handleLoginResult res =
+            case res of
+                Ok ( webhook, maybePartyId ) ->
+                    LoggedInModel (Ready webhook) Nothing Nothing Nothing maybePartyId Dict.empty
+                        |> LoggedIn
+                        |> Decode.succeed
 
-            else
-                Decode.field "message" (Decode.map LoginFailure Decode.string)
+                Err msg ->
+                    Decode.succeed (LoginFailure msg)
     in
-    Decode.field "success" Decode.bool
+    habiticaResponseDecoder userResponseDecoder
         |> Decode.andThen handleLoginResult
+
+
+groupNameDecoder : Decoder (Result String GroupName)
+groupNameDecoder =
+    habiticaResponseDecoder (Decode.at [ "data", "name" ] Decode.string)
 
 
 webhookDecoder : Decoder Webhook
