@@ -2160,7 +2160,7 @@ main =
         , view =
             \model ->
                 Browser.Document
-                    "Habitica Webhook Manager"
+                    "Habitica Webhook Editor"
                     [ FA.css, view model ]
         , update = update
         , subscriptions = \_ -> Sub.none
