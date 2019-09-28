@@ -20,4 +20,6 @@ $ nix-shell # Start a shell with the dependencies installed
 $ elm reactor # Start the development server
 ```
 
-At this point, you should have a local version of the project running which you can access at `localhost:8000`.
+**Note**: *If you don't have SSH keys set up in GitHub, you'll have to clone from the https link instead.*
+
+At this point, you should have a local version of the project running which you can access at `localhost:8000/src/Main.elm`.
