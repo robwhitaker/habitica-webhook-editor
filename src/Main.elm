@@ -954,12 +954,22 @@ view model =
 
 
 contentColumn : List (Element Msg) -> Element Msg
-contentColumn =
+contentColumn body =
     Element.column
         [ Element.centerX
         , Element.centerY
         , Element.spacing 10
         , Element.paddingXY 0 15
+        , Element.height Element.fill
+        ]
+        [ Element.column
+            [ Element.centerX
+            , Element.centerY
+            , Element.spacing 10
+            , Element.paddingXY 0 15
+            ]
+            (heading :: body)
+        , footer
         ]
 
 
@@ -988,8 +998,7 @@ loginPage model =
             model.userApiKey
     in
     contentColumn
-        [ h1 "Habitica Webhook Editor"
-        , textInput Input.username
+        [ textInput Input.username
             [ Element.htmlAttribute (A.name "username") ]
             { onChange = UpdateUserId << UserUUID
             , text = userId
@@ -1598,6 +1607,49 @@ webhookDashboard model =
                         webhookEditor model.partyId editor
 
 
+heading : Element Msg
+heading =
+    Element.column
+        [ Font.center
+        , Element.centerX
+        ]
+        [ h1_ (Element.text "Habitica Webhook Editor")
+        , Element.el
+            [ Font.size 14
+            , Font.color theme.text.faded
+            , Element.alignRight
+            , Element.moveRight 15
+            ]
+            (Element.text "v1.0.0")
+        ]
+
+
+footer : Element Msg
+footer =
+    Element.paragraph
+        [ Font.size 12
+        , Font.color theme.text.faded
+        , Font.center
+        , Element.centerX
+        , Element.width (Element.fill |> Element.maximum 400)
+        , Element.alignBottom
+        ]
+        [ Element.text "Created by "
+        , Element.newTabLink
+            [ Font.color theme.text.link ]
+            { url = "https://habitica.com/profile/cab16cfa-e951-4dc3-a468-1abadc1dd109"
+            , label = Element.text "rhitakorrr"
+            }
+        , Element.text ". Bug reports and pull requests may be submitted on this project's "
+        , Element.newTabLink
+            [ Font.color theme.text.link ]
+            { url = "https://github.com/robwhitaker/habitica-webhook-editor"
+            , label = Element.text "GitHub page"
+            }
+        , Element.text "."
+        ]
+
+
 
 -- Reusable styled elements
 
@@ -1688,9 +1740,13 @@ h n extraAttrs txt =
     h_ n extraAttrs (Element.text txt)
 
 
-h1 : String -> Element Msg
-h1 =
-    h 1 [ Element.centerX, Font.size 32 ]
+h1_ : Element Msg -> Element Msg
+h1_ =
+    h_ 1
+        [ Font.size 34
+        , Font.family [ Font.typeface "Trebuchet MS" ]
+        , Element.centerX
+        ]
 
 
 h2_ : Element Msg -> Element Msg
