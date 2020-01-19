@@ -145,6 +145,7 @@ type Type
     = TaskActivity TaskActivityOptions
     | GroupChatReceived GroupChatReceivedOptions
     | UserActivity UserActivityOptions
+    | QuestActivity QuestActivityOptions
 
 
 type alias TaskActivityOptions =
@@ -167,6 +168,13 @@ type alias UserActivityOptions =
     }
 
 
+type alias QuestActivityOptions =
+    { questStarted : Bool
+    , questFinished : Bool
+    , questInvited : Bool
+    }
+
+
 type alias Webhook =
     { id : Maybe WebhookUUID
     , url : Result String Url
@@ -180,6 +188,7 @@ type EditType
     = EditTaskActivity
     | EditGroupChatReceived
     | EditUserActivity
+    | EditQuestActivity
 
 
 type EditableTaskActivityOptions
@@ -192,6 +201,10 @@ type EditableGroupChatReceivedOptions
 
 type EditableUserActivityOptions
     = EditableUserActivityOptions UserActivityOptions
+
+
+type EditableQuestActivityOptions
+    = EditableQuestActivityOptions QuestActivityOptions
 
 
 emptyEditableTaskActivity : EditableTaskActivityOptions
@@ -220,6 +233,15 @@ emptyEditableUserActivity =
         }
 
 
+emptyEditableQuestActivity : EditableQuestActivityOptions
+emptyEditableQuestActivity =
+    EditableQuestActivityOptions
+        { questStarted = False
+        , questFinished = False
+        , questInvited = False
+        }
+
+
 type alias WebhookEditForm =
     { id : Maybe String
     , url : String
@@ -229,6 +251,7 @@ type alias WebhookEditForm =
     , taskActivityOptions : EditableTaskActivityOptions
     , groupChatReceivedOptions : EditableGroupChatReceivedOptions
     , userActivityOptions : EditableUserActivityOptions
+    , questActivityOptions : EditableQuestActivityOptions
     }
 
 
@@ -242,6 +265,7 @@ defaultWebhookEditForm =
     , taskActivityOptions = emptyEditableTaskActivity
     , groupChatReceivedOptions = emptyEditableGroupChatReceived
     , userActivityOptions = emptyEditableUserActivity
+    , questActivityOptions = emptyEditableQuestActivity
     }
 
 
@@ -273,6 +297,9 @@ type Msg
     | EditorSetOptMountRaised Bool
     | EditorSetOptLeveledUp Bool
     | EditorSetOptGroupId String
+    | EditorSetOptQuestStarted Bool
+    | EditorSetOptQuestFinished Bool
+    | EditorSetOptQuestInvited Bool
     | EditorSubmit
     | EditorCancel
 
@@ -460,6 +487,7 @@ update msg model =
                                                   , taskActivityOptions = hookOpts.opts.taskActivityOptions
                                                   , groupChatReceivedOptions = hookOpts.opts.groupChatReceivedOptions
                                                   , userActivityOptions = hookOpts.opts.userActivityOptions
+                                                  , questActivityOptions = hookOpts.opts.questActivityOptions
                                                   }
                                                 , []
                                                 )
@@ -558,6 +586,15 @@ update msg model =
 
         EditorSetOptGroupId groupId ->
             ( mapGroupChatReceivedOptions (\opts -> { opts | groupId = groupId }) model, Cmd.none )
+
+        EditorSetOptQuestStarted questStarted ->
+            ( mapQuestActivityOptions (\opts -> { opts | questStarted = questStarted }) model, Cmd.none )
+
+        EditorSetOptQuestFinished questFinished ->
+            ( mapQuestActivityOptions (\opts -> { opts | questFinished = questFinished }) model, Cmd.none )
+
+        EditorSetOptQuestInvited questInvited ->
+            ( mapQuestActivityOptions (\opts -> { opts | questInvited = questInvited }) model, Cmd.none )
 
         EditorSubmit ->
             case getEditor model of
@@ -735,6 +772,23 @@ editorToWebhook form =
                 |> andMapAccumErr validatedUrl
                 |> andMapAccumErr validatedHookId
 
+        EditQuestActivity ->
+            let
+                (EditableQuestActivityOptions opts) =
+                    form.questActivityOptions
+            in
+            Ok
+                (\url hookId ->
+                    { url = url
+                    , id = hookId
+                    , label = form.label
+                    , enabled = form.enabled
+                    , type_ = QuestActivity opts
+                    }
+                )
+                |> andMapAccumErr validatedUrl
+                |> andMapAccumErr validatedHookId
+
 
 andMapAccumErr : Result x a -> Result (List x) (a -> b) -> Result (List x) b
 andMapAccumErr result fnResult =
@@ -770,19 +824,25 @@ type alias EditorOpts =
     { taskActivityOptions : EditableTaskActivityOptions
     , groupChatReceivedOptions : EditableGroupChatReceivedOptions
     , userActivityOptions : EditableUserActivityOptions
+    , questActivityOptions : EditableQuestActivityOptions
     }
 
 
 typeToEditable : Type -> { editType : EditType, opts : EditorOpts }
 typeToEditable type_ =
+    let
+        defOpts =
+            { taskActivityOptions = emptyEditableTaskActivity
+            , groupChatReceivedOptions = emptyEditableGroupChatReceived
+            , userActivityOptions = emptyEditableUserActivity
+            , questActivityOptions = emptyEditableQuestActivity
+            }
+    in
     case type_ of
         TaskActivity opts ->
             { editType = EditTaskActivity
             , opts =
-                { taskActivityOptions = EditableTaskActivityOptions opts
-                , groupChatReceivedOptions = emptyEditableGroupChatReceived
-                , userActivityOptions = emptyEditableUserActivity
-                }
+                { defOpts | taskActivityOptions = EditableTaskActivityOptions opts }
             }
 
         GroupChatReceived opts ->
@@ -792,21 +852,22 @@ typeToEditable type_ =
             in
             { editType = EditGroupChatReceived
             , opts =
-                { taskActivityOptions = emptyEditableTaskActivity
-                , groupChatReceivedOptions =
-                    EditableGroupChatReceivedOptions
-                        { groupId = idUnwrapped }
-                , userActivityOptions = emptyEditableUserActivity
+                { defOpts
+                    | groupChatReceivedOptions =
+                        EditableGroupChatReceivedOptions { groupId = idUnwrapped }
                 }
             }
 
         UserActivity opts ->
             { editType = EditUserActivity
             , opts =
-                { taskActivityOptions = emptyEditableTaskActivity
-                , groupChatReceivedOptions = emptyEditableGroupChatReceived
-                , userActivityOptions = EditableUserActivityOptions opts
-                }
+                { defOpts | userActivityOptions = EditableUserActivityOptions opts }
+            }
+
+        QuestActivity opts ->
+            { editType = EditQuestActivity
+            , opts =
+                { defOpts | questActivityOptions = EditableQuestActivityOptions opts }
             }
 
 
@@ -900,6 +961,18 @@ mapUserActivityOptions f =
                     form.userActivityOptions
             in
             { form | userActivityOptions = EditableUserActivityOptions <| f opts }
+        )
+
+
+mapQuestActivityOptions : (QuestActivityOptions -> QuestActivityOptions) -> Model -> Model
+mapQuestActivityOptions f =
+    mapEditorFormFields
+        (\form ->
+            let
+                (EditableQuestActivityOptions opts) =
+                    form.questActivityOptions
+            in
+            { form | questActivityOptions = EditableQuestActivityOptions <| f opts }
         )
 
 
@@ -1241,6 +1314,24 @@ webhookView groupNames webhook =
                                 ]
                             ]
 
+                QuestActivity opts ->
+                    optUI
+                        [ Tuple.pair opts.questStarted "a quest is started"
+                        , Tuple.pair opts.questFinished "a quest is finished"
+                        , Tuple.pair opts.questInvited "the user is invited to a quest"
+                        ]
+                    <|
+                        \phrase ->
+                            [ Element.text "This webhook will send an event to"
+                            , highlightBox webhookUrlLink
+                            , Element.wrappedRow []
+                                [ Element.text "when "
+                                , Element.paragraph highlightStyle <|
+                                    phrase
+                                        ++ [ Element.text "." ]
+                                ]
+                            ]
+
         webhookErrors =
             [ webhook.url
                 |> Result.map (always ())
@@ -1435,6 +1526,7 @@ webhookTypeEditor partyId fields =
                     [ Input.optionWith EditTaskActivity (hookTypeOption "taskActivity")
                     , Input.optionWith EditGroupChatReceived (hookTypeOption "groupChatReceived")
                     , Input.optionWith EditUserActivity (hookTypeOption "userActivity")
+                    , Input.optionWith EditQuestActivity (hookTypeOption "questActivity")
                     ]
                 , selected = Just fields.type_
                 , label = Input.labelHidden "Webhook Type"
@@ -1494,6 +1586,16 @@ webhookTypeEditor partyId fields =
                         [ checkboxFieldRow EditorSetOptMountRaised opts.mountRaised "mountRaised"
                         , checkboxFieldRow EditorSetOptPetHatched opts.petHatched "petHatched"
                         , checkboxFieldRow EditorSetOptLeveledUp opts.leveledUp "leveledUp"
+                        ]
+
+                    EditQuestActivity ->
+                        let
+                            (EditableQuestActivityOptions opts) =
+                                fields.questActivityOptions
+                        in
+                        [ checkboxFieldRow EditorSetOptQuestStarted opts.questStarted "questStarted"
+                        , checkboxFieldRow EditorSetOptQuestFinished opts.questFinished "questFinished"
+                        , checkboxFieldRow EditorSetOptQuestInvited opts.questInvited "questInvited"
                         ]
             ]
         ]
@@ -1620,7 +1722,7 @@ heading =
             , Element.alignRight
             , Element.moveRight 15
             ]
-            (Element.text "v1.0.0")
+            (Element.text "v1.1.0")
         ]
 
 
@@ -2027,6 +2129,13 @@ webhookDecoder =
                 (Decode.field "mountRaised" Decode.bool)
                 (Decode.field "leveledUp" Decode.bool)
 
+        questActivityOptionsDecoder : Decoder QuestActivityOptions
+        questActivityOptionsDecoder =
+            Decode.map3 QuestActivityOptions
+                (Decode.field "questStarted" Decode.bool)
+                (Decode.field "questFinished" Decode.bool)
+                (Decode.field "questInvited" Decode.bool)
+
         decodeType : String -> Decoder Type
         decodeType typeStr =
             let
@@ -2040,6 +2149,9 @@ webhookDecoder =
 
                         "userActivity" ->
                             Decode.map UserActivity userActivityOptionsDecoder
+
+                        "questActivity" ->
+                            Decode.map QuestActivity questActivityOptionsDecoder
 
                         _ ->
                             Decode.fail ("Invalid webhook type: " ++ typeStr)
@@ -2121,6 +2233,17 @@ webhookEncoder webhook =
                                 [ ( "petHatched", Encode.bool opts.petHatched )
                                 , ( "mountRaised", Encode.bool opts.mountRaised )
                                 , ( "leveledUp", Encode.bool opts.leveledUp )
+                                ]
+                          )
+                        ]
+
+                    QuestActivity opts ->
+                        [ ( "type", Encode.string "questActivity" )
+                        , ( "options"
+                          , Encode.object
+                                [ ( "questStarted", Encode.bool opts.questStarted )
+                                , ( "questFinished", Encode.bool opts.questFinished )
+                                , ( "questInvited", Encode.bool opts.questInvited )
                                 ]
                           )
                         ]
