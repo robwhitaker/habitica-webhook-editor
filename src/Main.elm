@@ -1140,8 +1140,8 @@ webhookView : GroupNameDict -> Webhook -> Element Msg
 webhookView groupNames webhook =
     let
         labelTxt =
-            if String.trim webhook.label == "" then
-                "Unlabeled webhook"
+            if webhook.label == "" then
+                "Unlabeled Webhook"
 
             else
                 webhook.label
@@ -2184,16 +2184,7 @@ webhookEncoder : Webhook -> Value
 webhookEncoder webhook =
     Encode.object <|
         [ ( "url", Encode.string (unwrapUrl webhook.url) )
-        , ( "label"
-            -- This is a janky hack because Habitica treats
-            -- empty string as "no label field provided" and therefore
-            -- fails to clear the field.
-          , if String.length webhook.label > 0 then
-                Encode.string webhook.label
-
-            else
-                Encode.string " "
-          )
+        , ( "label", Encode.string webhook.label )
         , ( "enabled", Encode.bool webhook.enabled )
         ]
             ++ (case webhook.type_ of
