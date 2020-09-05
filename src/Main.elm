@@ -609,7 +609,7 @@ update msg model =
                         Ok webhook ->
                             let
                                 saveCmd =
-                                    saveWebhookWrapper model.userId model.userApiKey webhook
+                                    saveWebhook model.userId model.userApiKey webhook
                                         |> Task.attempt SavedWebhook
                             in
                             withLoggedInModel
@@ -1976,44 +1976,6 @@ getGroupName userId apiKey ((GroupUUID uuid) as groupId) =
         , timeout = Nothing
         , tracker = Nothing
         }
-
-
-
-{- This is a hack fix to address a Habitica API bug where changing a webhook's options
-   doesn't take unless you are also changing the type of the webhook. This wrapper calls
-   saveWebook twice, the first time switching the type with garbage options and the second
-   changing it back with the options we want.
--}
-
-
-saveWebhookWrapper : UserUUID -> UserApiKey -> Webhook -> Task (Http.Response String) ()
-saveWebhookWrapper uuid apiKey webhook =
-    let
-        tempType =
-            case webhook.type_ of
-                UserActivity _ ->
-                    TaskActivity
-                        { created = False
-                        , updated = False
-                        , deleted = False
-                        , scored = False
-                        , checklistScored = False
-                        }
-
-                _ ->
-                    UserActivity
-                        { petHatched = False
-                        , mountRaised = False
-                        , leveledUp = False
-                        }
-    in
-    case webhook.id of
-        Nothing ->
-            saveWebhook uuid apiKey webhook
-
-        Just _ ->
-            saveWebhook uuid apiKey { webhook | type_ = tempType }
-                |> Task.andThen (\_ -> saveWebhook uuid apiKey webhook)
 
 
 saveWebhook : UserUUID -> UserApiKey -> Webhook -> Task (Http.Response String) ()
