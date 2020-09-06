@@ -1894,7 +1894,7 @@ heading =
             , Element.alignRight
             , Element.moveRight 15
             ]
-            (Element.text "v1.1.0")
+            (Element.text "v1.2.0")
         ]
 
 
