@@ -19,6 +19,7 @@ import Json.Decode as Decode exposing (Decoder)
 import Json.Encode as Encode exposing (Value)
 import List.Nonempty as Nonempty exposing (Nonempty)
 import Task exposing (Task)
+import Time exposing (Posix)
 import Url exposing (Url)
 import Uuid exposing (Uuid)
 
@@ -38,12 +39,41 @@ maintainerId =
 
 
 
+-- Template text
+
+
+secondsUntilRetry : Posix -> Posix -> Int
+secondsUntilRetry retryAfter currentTime =
+    ceiling <| toFloat (Time.posixToMillis retryAfter - Time.posixToMillis currentTime) / 1000
+
+
+manualRetryRateLimit : Posix -> Posix -> String
+manualRetryRateLimit retryAfter currentTime =
+    let
+        secondsLeft =
+            String.fromInt (secondsUntilRetry retryAfter currentTime)
+    in
+    "You have been rate limited! Try again in " ++ secondsLeft ++ " seconds."
+
+
+autoRetryRateLimit : Posix -> Posix -> String
+autoRetryRateLimit retryAfter currentTime =
+    let
+        secondsLeft =
+            String.fromInt (secondsUntilRetry retryAfter currentTime)
+    in
+    "You have been rate limited! Trying again in " ++ secondsLeft ++ " seconds."
+
+
+
 -- Model
 
 
 type alias Model =
     { userId : UserUUID
     , userApiKey : UserApiKey
+    , currentTime : Posix
+    , rateLimitRetryAfter : Posix
     , session : Session
     }
 
@@ -67,6 +97,7 @@ type alias LoggedInModel =
     , requestError : Maybe WebhookListError
     , partyId : Maybe GroupUUID
     , groupNames : GroupNameDict
+    , delayedRequest : Maybe (Cmd Msg)
     }
 
 
@@ -89,6 +120,8 @@ empty : Model
 empty =
     { userId = UserUUID ""
     , userApiKey = UserApiKey ""
+    , currentTime = Time.millisToPosix 1
+    , rateLimitRetryAfter = Time.millisToPosix 0
     , session = NotLoggedIn
     }
 
@@ -117,8 +150,9 @@ type SaveAction
     | SaveUpdate
 
 
-type alias LoginFailureMessage =
-    String
+type LoginFailureMessage
+    = OneTimeLoginFailure String
+    | RateLimitLoginFailure
 
 
 type
@@ -269,16 +303,21 @@ defaultWebhookEditForm =
     }
 
 
+type FailureResponse a
+    = AnyFailure a
+    | RateLimitExceededFailure Posix
+
+
 type Msg
     = UpdateUserId UserUUID
     | UpdateUserApiKey UserApiKey
     | Login
-    | ReceiveLoginResult (Result String Session)
     | ReloadWebhooks
-    | ReloadedWebhooks (Result String (List Webhook))
-    | SavedWebhook (Result (Http.Response String) ())
-    | DeletedWebhook (Result Http.Error ())
-    | GotGroupName (Result String GroupUUID) (Result String (Result String GroupName))
+    | ReceiveLoginResult (Result (FailureResponse String) Session)
+    | ReloadedWebhooks (Result (FailureResponse String) (List Webhook))
+    | SavedWebhook (Result (FailureResponse String) ())
+    | DeletedWebhook (Result (FailureResponse String) ())
+    | GotGroupName (Result String GroupUUID) (Result (FailureResponse String) (Result String GroupName))
     | Edit (Maybe Webhook)
     | Delete WebhookUUID
     | ConfirmDelete Webhook
@@ -302,6 +341,7 @@ type Msg
     | EditorSetOptQuestInvited Bool
     | EditorSubmit
     | EditorCancel
+    | SetCurrentTime Posix
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -322,13 +362,24 @@ update msg model =
 
         ReceiveLoginResult result ->
             case result of
-                Err e ->
-                    ( { model
-                        | session =
-                            LoginFailure e
-                      }
-                    , Cmd.none
-                    )
+                Err err ->
+                    case err of
+                        RateLimitExceededFailure retryAfter ->
+                            ( setRetryAfterTime retryAfter
+                                { model
+                                    | session =
+                                        LoginFailure RateLimitLoginFailure
+                                }
+                            , Cmd.none
+                            )
+
+                        AnyFailure e ->
+                            ( { model
+                                | session =
+                                    LoginFailure <| OneTimeLoginFailure e
+                              }
+                            , Cmd.none
+                            )
 
                 Ok session ->
                     ( { model | session = session }
@@ -346,26 +397,44 @@ update msg model =
                     )
 
         ReloadWebhooks ->
+            let
+                cmd =
+                    reloadWebhooks model.userId model.userApiKey
+            in
             withLoggedInModel
                 (\loggedInModel ->
                     ( { loggedInModel
                         | webhooks = Reloading
+                        , delayedRequest = Just cmd
                       }
-                    , reloadWebhooks model.userId model.userApiKey
+                    , cmd
                     )
                 )
                 model
 
         ReloadedWebhooks result ->
-            withLoggedInModel
-                (\loggedInModel ->
-                    case result of
-                        Err err ->
-                            ( { loggedInModel | webhooks = FailedLoading err }, Cmd.none )
+            case result of
+                Err (RateLimitExceededFailure timeRemaining) ->
+                    ( setRetryAfterTime timeRemaining model, Cmd.none )
 
-                        Ok webhooks ->
+                Err (AnyFailure err) ->
+                    withLoggedInModel
+                        (\loggedInModel ->
+                            ( { loggedInModel
+                                | webhooks = FailedLoading err
+                                , delayedRequest = Nothing
+                              }
+                            , Cmd.none
+                            )
+                        )
+                        model
+
+                Ok webhooks ->
+                    withLoggedInModel
+                        (\loggedInModel ->
                             ( { loggedInModel
                                 | webhooks = Ready webhooks
+                                , delayedRequest = Nothing
                                 , requestError =
                                     case loggedInModel.requestError of
                                         Nothing ->
@@ -379,18 +448,21 @@ update msg model =
                               }
                             , fetchGroupNames model.userId model.userApiKey webhooks loggedInModel.groupNames
                             )
-                )
-                model
+                        )
+                        model
 
         SavedWebhook result ->
-            withLoggedInModel
-                (\loggedInModel ->
-                    let
-                        reloadCmd =
-                            reloadWebhooks model.userId model.userApiKey
-                    in
-                    case result of
-                        Err _ ->
+            let
+                reloadCmd =
+                    reloadWebhooks model.userId model.userApiKey
+            in
+            case result of
+                Err (RateLimitExceededFailure timeRemaining) ->
+                    ( setRetryAfterTime timeRemaining model, Cmd.none )
+
+                Err (AnyFailure err) ->
+                    withLoggedInModel
+                        (\loggedInModel ->
                             -- TODO: It would make sense to do this before leaving the editor
                             --       so the user doesn't lose their form data.
                             ( { loggedInModel
@@ -398,47 +470,62 @@ update msg model =
                                     Just <|
                                         ErrorUnseen
                                             "There was an error saving your webhook. Please try again later."
+                                , delayedRequest = Just reloadCmd
                               }
                             , reloadCmd
                             )
+                        )
+                        model
 
-                        Ok _ ->
+                Ok webhooks ->
+                    withLoggedInModel
+                        (\loggedInModel ->
                             ( { loggedInModel
                                 | requestError = Nothing
                                 , webhooks = Reloading
+                                , delayedRequest = Just reloadCmd
                               }
                             , reloadCmd
                             )
-                )
-                model
+                        )
+                        model
 
         DeletedWebhook result ->
-            withLoggedInModel
-                (\loggedInModel ->
-                    let
-                        reloadCmd =
-                            reloadWebhooks model.userId model.userApiKey
-                    in
-                    case result of
-                        Err _ ->
+            let
+                reloadCmd =
+                    reloadWebhooks model.userId model.userApiKey
+            in
+            case result of
+                Err (RateLimitExceededFailure timeRemaining) ->
+                    ( setRetryAfterTime timeRemaining model, Cmd.none )
+
+                Err (AnyFailure err) ->
+                    withLoggedInModel
+                        (\loggedInModel ->
                             ( { loggedInModel
                                 | requestError =
                                     Just <|
                                         ErrorUnseen
                                             "There was an error deleting your webhook. Please try again later."
+                                , delayedRequest = Just reloadCmd
                               }
                             , reloadCmd
                             )
+                        )
+                        model
 
-                        Ok _ ->
+                Ok webhooks ->
+                    withLoggedInModel
+                        (\loggedInModel ->
                             ( { loggedInModel
                                 | requestError = Nothing
                                 , webhooks = Reloading
+                                , delayedRequest = Just reloadCmd
                               }
                             , reloadCmd
                             )
-                )
-                model
+                        )
+                        model
 
         GotGroupName groupId result_ ->
             let
@@ -446,7 +533,15 @@ update msg model =
                     unwrapGroupId groupId
 
                 result =
-                    result_ |> Result.andThen identity
+                    case result_ of
+                        Err (RateLimitExceededFailure _) ->
+                            Err "Unable to fetch group name. Rate limit exceeded."
+
+                        Err (AnyFailure errMsg) ->
+                            Err errMsg
+
+                        Ok val ->
+                            val
 
                 newModel =
                     mapLoggedInModel
@@ -498,13 +593,18 @@ update msg model =
             ( newModel, Cmd.none )
 
         Delete uuid ->
+            let
+                deleteCmd =
+                    deleteWebhook model.userId model.userApiKey uuid
+            in
             withLoggedInModel
                 (\loggedInModel ->
                     ( { loggedInModel
                         | webhooks = Saving SaveDelete
                         , confirm = Nothing
+                        , delayedRequest = Just deleteCmd
                       }
-                    , deleteWebhook model.userId model.userApiKey uuid
+                    , deleteCmd
                     )
                 )
                 model
@@ -610,7 +710,6 @@ update msg model =
                             let
                                 saveCmd =
                                     saveWebhook model.userId model.userApiKey webhook
-                                        |> Task.attempt SavedWebhook
                             in
                             withLoggedInModel
                                 (\m ->
@@ -624,6 +723,7 @@ update msg model =
                                                     Saving SaveUpdate
                                         , editor = Nothing
                                         , confirm = Nothing
+                                        , delayedRequest = Just saveCmd
                                         , requestError = Nothing
                                       }
                                     , saveCmd
@@ -651,6 +751,30 @@ update msg model =
                 model
             , Cmd.none
             )
+
+        SetCurrentTime time ->
+            let
+                newModel =
+                    { model | currentTime = time }
+
+                delayedRequest =
+                    case model.session of
+                        LoggedIn loggedInModel ->
+                            loggedInModel.delayedRequest
+
+                        _ ->
+                            Nothing
+            in
+            if Time.posixToMillis newModel.currentTime > Time.posixToMillis model.rateLimitRetryAfter then
+                case delayedRequest of
+                    Nothing ->
+                        ( newModel, Cmd.none )
+
+                    Just req ->
+                        ( newModel, req )
+
+            else
+                ( newModel, Cmd.none )
 
 
 fetchGroupNames : UserUUID -> UserApiKey -> List Webhook -> GroupNameDict -> Cmd Msg
@@ -681,7 +805,7 @@ fetchGroupNames userId apiKey webhooks namesById =
 
                         Err _ ->
                             (Task.succeed
-                                (GotGroupName groupId (Err "Invalid group UUID. Unable to fetch group."))
+                                (GotGroupName groupId (Err <| AnyFailure "Invalid group UUID. Unable to fetch group."))
                                 |> Task.perform identity
                             )
                                 :: cmds
@@ -1020,7 +1144,7 @@ view model =
     <|
         case model.session of
             LoggedIn loggedInModel ->
-                webhookDashboard loggedInModel
+                webhookDashboard model loggedInModel
 
             _ ->
                 loginPage model
@@ -1054,12 +1178,23 @@ loginPage model =
                 AttemptingLogin ->
                     Element.text "Logging in..."
 
-                LoginFailure msg ->
+                LoginFailure (OneTimeLoginFailure msg) ->
                     Element.el
                         [ Font.color theme.text.error
                         , Element.centerX
                         ]
                         (Element.text msg)
+
+                LoginFailure RateLimitLoginFailure ->
+                    if Time.posixToMillis model.currentTime > Time.posixToMillis model.rateLimitRetryAfter then
+                        Element.none
+
+                    else
+                        Element.el
+                            [ Font.color theme.text.error
+                            , Element.centerX
+                            ]
+                            (Element.text <| manualRetryRateLimit model.rateLimitRetryAfter model.currentTime)
 
                 _ ->
                     Element.none
@@ -1086,9 +1221,32 @@ loginPage model =
             , label = Input.labelHidden "API Key"
             , show = False
             }
-        , yesButton
-            [ Element.width Element.fill ]
-            (Just Login)
+        , let
+            disabled =
+                Time.posixToMillis model.rateLimitRetryAfter >= Time.posixToMillis model.currentTime
+          in
+          yesButton
+            ([ Element.width Element.fill ]
+                ++ (if disabled then
+                        [ Border.dashed
+                        , Border.color theme.misc.widget
+                        , Border.width 1
+                        , Font.color theme.text.faded
+                        , Font.italic
+                        , BG.color theme.page.background
+                        , Element.mouseOver []
+                        ]
+
+                    else
+                        []
+                   )
+            )
+            (if disabled then
+                Nothing
+
+             else
+                Just Login
+            )
             "Login"
         , Element.el
             [ Element.width Element.fill
@@ -1099,14 +1257,28 @@ loginPage model =
         ]
 
 
-workingOn : String -> List (Element Msg)
-workingOn job =
+workingOn : Model -> String -> List (Element Msg)
+workingOn model job =
     [ Element.el
         [ Element.centerX
         , Element.centerY
         ]
         (Element.text job)
     ]
+        ++ (if Time.posixToMillis model.rateLimitRetryAfter >= Time.posixToMillis model.currentTime then
+                [ Element.el
+                    [ Font.color theme.text.error
+                    , Element.padding 10
+                    , Font.size 18
+                    , Element.centerX
+                    , Element.centerY
+                    ]
+                    (Element.text <| autoRetryRateLimit model.rateLimitRetryAfter model.currentTime)
+                ]
+
+            else
+                []
+           )
 
 
 confirmation : Confirmation -> List (Element Msg)
@@ -1655,27 +1827,27 @@ webhookEditor partyId editor =
     ]
 
 
-webhookDashboard : LoggedInModel -> Element Msg
-webhookDashboard model =
+webhookDashboard : Model -> LoggedInModel -> Element Msg
+webhookDashboard model loggedInModel =
     contentColumn <|
-        case model.webhooks of
+        case loggedInModel.webhooks of
             Reloading ->
-                workingOn "Fetching updated webhooks."
+                workingOn model "Fetching updated webhooks."
 
             Saving SaveDelete ->
-                workingOn "Deleting webhook."
+                workingOn model "Deleting webhook."
 
             Saving SaveCreate ->
-                workingOn "Creating webhook."
+                workingOn model "Creating webhook."
 
             Saving SaveUpdate ->
-                workingOn "Updating webhook."
+                workingOn model "Updating webhook."
 
             FailedLoading err ->
-                workingOn "Failed to load webhooks."
+                workingOn model "Failed to load webhooks."
 
             Ready webhooks ->
-                case ( model.confirm, model.editor ) of
+                case ( loggedInModel.confirm, loggedInModel.editor ) of
                     ( Just confirm, _ ) ->
                         confirmation confirm
 
@@ -1690,7 +1862,7 @@ webhookDashboard model =
                                         txt
 
                             errorBox =
-                                case model.requestError of
+                                case loggedInModel.requestError of
                                     Nothing ->
                                         Element.none
 
@@ -1703,10 +1875,10 @@ webhookDashboard model =
                                             ]
                                             (Element.text <| showError err)
                         in
-                        errorBox :: webhookList model.groupNames webhooks
+                        errorBox :: webhookList loggedInModel.groupNames webhooks
 
                     ( Nothing, Just editor ) ->
-                        webhookEditor model.partyId editor
+                        webhookEditor loggedInModel.partyId editor
 
 
 heading : Element Msg
@@ -1892,17 +2064,39 @@ inputPlaceholder txt =
             (Element.text txt)
 
 
-customResponseHandler : Decoder a -> (Http.Response String -> Result String a)
+setRetryAfterTime : Posix -> Model -> Model
+setRetryAfterTime retryAfter model =
+    { model
+        | rateLimitRetryAfter =
+            Time.millisToPosix <| Time.posixToMillis model.currentTime + Time.posixToMillis retryAfter
+    }
+
+
+customResponseHandler : Decoder a -> (Http.Response String -> Result (FailureResponse String) a)
 customResponseHandler decoder =
     \response ->
         case response of
             Http.BadStatus_ metadata body ->
-                case Decode.decodeString decoder body of
-                    Ok value ->
-                        Ok value
+                case Dict.get "retry-after" metadata.headers of
+                    Just retryAfter ->
+                        case String.toFloat retryAfter of
+                            Just time ->
+                                -- The 2 here is a magic number. It's just a little time padding since most of the time
+                                -- the rate limit won't be done exactly after the retryAfter time. Generally, it needs
+                                -- another second or so. Nothing will break if the request is made a little early, but
+                                -- who wants to see the timer hit zero and then go back up after trying again?
+                                Err <| RateLimitExceededFailure (Time.millisToPosix <| round <| (2 + time) * 1000)
 
-                    Err err ->
-                        Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
+                            Nothing ->
+                                Err <| AnyFailure "Something went wrong while trying to parse the rate limit header, Retry-After."
+
+                    Nothing ->
+                        case Decode.decodeString decoder body of
+                            Ok value ->
+                                Ok value
+
+                            Err err ->
+                                Err <| AnyFailure ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
 
             Http.GoodStatus_ metadata body ->
                 case Decode.decodeString decoder body of
@@ -1910,13 +2104,13 @@ customResponseHandler decoder =
                         Ok value
 
                     Err err ->
-                        Err ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
+                        Err <| AnyFailure ("Something went wrong while parsing the response from the server. Error message was: " ++ Decode.errorToString err)
 
             _ ->
-                Err "Something went wrong. Please try again later."
+                Err <| AnyFailure "Something went wrong. Please try again later."
 
 
-customExpectJson : (Result String a -> msg) -> Decoder a -> Http.Expect msg
+customExpectJson : (Result (FailureResponse String) a -> msg) -> Decoder a -> Http.Expect msg
 customExpectJson toMsg =
     Http.expectStringResponse toMsg << customResponseHandler
 
@@ -1959,7 +2153,7 @@ deleteWebhook userId apiKey (WebhookUUID uuid) =
         , headers = mkHeaders userId apiKey
         , url = "https://habitica.com/api/v3/user/webhook/" ++ Uuid.toString uuid
         , body = Http.emptyBody
-        , expect = Http.expectWhatever DeletedWebhook
+        , expect = customExpectJson DeletedWebhook (Decode.succeed ())
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -1978,7 +2172,7 @@ getGroupName userId apiKey ((GroupUUID uuid) as groupId) =
         }
 
 
-saveWebhook : UserUUID -> UserApiKey -> Webhook -> Task (Http.Response String) ()
+saveWebhook : UserUUID -> UserApiKey -> Webhook -> Cmd Msg
 saveWebhook userId apiKey webhook =
     let
         ( method, endpoint ) =
@@ -1996,22 +2190,14 @@ saveWebhook userId apiKey webhook =
         encodedWebhook =
             webhookEncoder webhook
     in
-    Http.task
+    Http.request
         { method = method
         , headers = mkHeaders userId apiKey
         , url = endpoint
         , body = Http.jsonBody encodedWebhook
-        , resolver =
-            Http.stringResolver
-                (\res ->
-                    case res of
-                        Http.GoodStatus_ _ _ ->
-                            Ok ()
-
-                        other ->
-                            Err res
-                )
+        , expect = customExpectJson SavedWebhook (Decode.succeed ())
         , timeout = Nothing
+        , tracker = Nothing
         }
 
 
@@ -2046,12 +2232,12 @@ loginDecoder =
         handleLoginResult res =
             case res of
                 Ok ( webhook, maybePartyId ) ->
-                    LoggedInModel (Ready webhook) Nothing Nothing Nothing maybePartyId Dict.empty
+                    LoggedInModel (Ready webhook) Nothing Nothing Nothing maybePartyId Dict.empty Nothing
                         |> LoggedIn
                         |> Decode.succeed
 
                 Err msg ->
-                    Decode.succeed (LoginFailure msg)
+                    Decode.succeed (LoginFailure <| OneTimeLoginFailure msg)
     in
     habiticaResponseDecoder userResponseDecoder
         |> Decode.andThen handleLoginResult
@@ -2239,5 +2425,5 @@ main =
                     "Habitica Webhook Editor"
                     [ FA.css, view model ]
         , update = update
-        , subscriptions = \_ -> Sub.none
+        , subscriptions = \_ -> Time.every 1000 SetCurrentTime
         }
